@@ -259,7 +259,7 @@ class Library(commands.Cog):
     async def remove(self, ctx: commands.Context, fromId: int) -> None:
         await ctx.send('Started removing novel')
         for i in range(775,900):
-            self.bot.mongo.library.remove_novel(int(i))
+            await self.bot.mongo.library.remove_novel(int(i))
         await ctx.send('Completed')
 
 
