@@ -253,14 +253,14 @@ class Library(commands.Cog):
     async def progress(self, ctx: commands.Context) -> None:
         await ctx.send(f'In progress {self.bot.progress} of {self.bot.total} completed')
 
-    @commands.hybrid_command(
-        help="remove ids"
-    )
-    async def remove(self, ctx: commands.Context, fromId: int) -> None:
-        await ctx.send('Started removing novel')
-        for i in range(775,848):
-            self.bot.mongo.library.remove_novel(i)
-        await ctx.send('Completed')
+    # @commands.hybrid_command(
+    #     help="remove ids"
+    # )
+    # async def remove(self, ctx: commands.Context, fromId: int) -> None:
+    #     await ctx.send('Started removing novel')
+    #     for i in range(775,848):
+    #         self.bot.mongo.library.remove_novel(i)
+    #     await ctx.send('Completed')
 
 
 
