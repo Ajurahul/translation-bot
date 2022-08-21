@@ -200,7 +200,7 @@ class Library(commands.Cog):
         await ctx.send("Novel reviewed.")
 
     @library.command(name="add", help="add novels in mega folder")
-    async def add(self, ctx: commands.Context, _id: int) -> None:
+    async def add(self, ctx: commands.Context) -> None:
         await ctx.send('connecting to mega')
         mega = Mega()
         m = mega.login(os.getenv("MAIL"), os.getenv("MEGA2"))
