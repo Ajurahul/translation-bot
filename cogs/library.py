@@ -4,6 +4,7 @@ import os
 import discord
 from discord import app_commands
 from discord.ext import commands
+from discord.ext.commands import has_permissions
 from mega import Mega
 from reactionmenu import ViewButton, ViewMenu
 
@@ -211,6 +212,7 @@ class Library(commands.Cog):
         self.bot.total=len(files)
         print(self.bot.total)
         for file in list(files.items()):
+          try:
             self.bot.progress=self.bot.progress+1
             strfile = list(file)
             if not (strfile[1]['t']) == 0:
@@ -238,12 +240,27 @@ class Library(commands.Cog):
                 data = Novel(*novel_data)
                 await self.bot.mongo.library.add_novel(data)
             print(await self.bot.mongo.library.next_number)
+          except Exception as e:
+              try:
+                  await ctx.send(str(e))
+              except :
+                  pass
+              print(e)
             # break
             # raise Exception
 
     @library.command(name="progress", help="gives progress")
     async def progress(self, ctx: commands.Context) -> None:
         await ctx.send(f'In progress {self.bot.progress} of {self.bot.total} completed')
+
+    @library.command(name="delete", help="gives progress")
+    @has_permissions(administrator=True)
+    async def deletefrom(self, ctx: commands.Context, fromId: int) -> None:
+        await ctx.send('Started removing novel')
+        for i in range(fromId,self.bot.mongo.library.next_number):
+            self.bot.mongo.library.remove_novel(i)
+        await ctx.send('Completed')
+
 
 
 

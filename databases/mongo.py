@@ -49,6 +49,9 @@ class Library(Database):
             {"_id": _id}, {"$set": {"description": description}}
         )
 
+    async def remove_novel(self, num: int) -> None:
+        await self.library.delete_one({"_id": num})
+
     @property
     async def next_number(self) -> int:
         return await self.get_total_novels + 1
