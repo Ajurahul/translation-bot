@@ -234,7 +234,7 @@ class Library(commands.Cog):
                 ]
                 data = Novel(*novel_data)
                 await self.bot.mongo.library.add_novel(data)
-            print(self.bot.mongo.library.next_number)
+            print(await self.bot.mongo.library.next_number)
             break
             raise Exception
 
