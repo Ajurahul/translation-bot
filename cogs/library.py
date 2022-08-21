@@ -208,8 +208,10 @@ class Library(commands.Cog):
         folder = m.find("novels")[0]
         files = m.get_files_in_node(folder)
         await ctx.send("Got all the files")
-        print(len(files))
+        self.bot.total=len(files)
+        print(self.bot.total)
         for file in list(files.items()):
+            self.bot.progress=self.bot.progress+1
             strfile = list(file)
             if not (strfile[1]['t']) == 0:
                 continue
@@ -217,7 +219,8 @@ class Library(commands.Cog):
             name = file[1]['a']['n']
             name = bytes(name, encoding="raw_unicode_escape", errors="ignore").decode()
             link = m.get_link(file)
-            await ctx.send(ctx.author.id)
+            await ctx.send()
+            # await ctx.send(ctx.author.id)
             print(str(size)+str(name)+str(link))
             if link:
                 novel_data = [
@@ -235,10 +238,12 @@ class Library(commands.Cog):
                 data = Novel(*novel_data)
                 await self.bot.mongo.library.add_novel(data)
             print(await self.bot.mongo.library.next_number)
-            break
-            raise Exception
+            # break
+            # raise Exception
 
-
+    @library.command(name="progress", help="gives progress")
+    async def progress(self, ctx: commands.Context) -> None:
+        await ctx.send(f'In progress {self.bot.progress} of {self.bot.total} completed')
 
 
 

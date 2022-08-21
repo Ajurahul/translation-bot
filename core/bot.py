@@ -22,8 +22,10 @@ class Raizel(commands.Bot):
     mongo: Mongo
 
     def __init__(self) -> None:
-        self.mega: Mega 
+        self.mega: Mega
         intents = discord.Intents.all()
+        self.progress: int = 0
+        self.total: int = 0
         self.translator: t.Dict[int, str] = {}
         self.crawler: t.Dict[int, str] = {}
         self.languages = choices
@@ -81,7 +83,7 @@ class Raizel(commands.Bot):
     def display_langs(self) -> str:
         string = ["{0: ^17}".format(f"{k} --> {v}") for k, v in self.languages.items()]
         string = "\n".join(
-            ["".join(string[i : i + 3]) for i in range(0, len(string), 3)]
+            ["".join(string[i: i + 3]) for i in range(0, len(string), 3)]
         )
         return string
 
