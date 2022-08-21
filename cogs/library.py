@@ -1,13 +1,15 @@
 import datetime
+import os
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+from mega import Mega
 from reactionmenu import ViewButton, ViewMenu
 
 from core.bot import Raizel
 from databases.data import Novel
-
+from utils.handler import FileHandler
 
 class Library(commands.Cog):
     def __init__(self, bot: Raizel) -> None:
@@ -196,6 +198,48 @@ class Library(commands.Cog):
         )
         await self.bot.mongo.library.update_rating(novel._id, rating)
         await ctx.send("Novel reviewed.")
+
+    @library.command(name="add", help="add novels in mega folder")
+    async def add(self, ctx: commands.Context, _id: int) -> None:
+        await ctx.send('connecting to mega')
+        mega = Mega()
+        m = mega.login(os.getenv("MAIL"), os.getenv("MEGA2"))
+        await ctx.send('Connection established')
+        folder = m.find("novels")[0]
+        files = m.get_files_in_node(folder)
+        await ctx.send("Got all the files")
+        print(len(files))
+        for file in list(files.items()):
+            strfile = list(file)
+            if not (strfile[1]['t']) == 0:
+                continue
+            size=file[1]['s']
+            name = file[1]['a']['n']
+            name = bytes(name, encoding="raw_unicode_escape", errors="ignore").decode()
+            link = m.get_link(file)
+            await ctx.send(ctx.author.id)
+            print(str(size)+str(name)+str(link))
+            if link:
+                novel_data = [
+                    await self.bot.mongo.library.next_number,
+                    name,
+                    "",
+                    0,
+                    "English",
+                    FileHandler.get_tags(name),
+                    link,
+                    size,
+                    ctx.author.id,
+                    datetime.datetime.utcnow().timestamp(),
+                ]
+                data = Novel(*novel_data)
+                await self.bot.mongo.library.add_novel(data)
+            print(self.bot.mongo.library.next_number)
+            break
+            raise Exception
+
+
+
 
 
 async def setup(bot: Raizel) -> None:
