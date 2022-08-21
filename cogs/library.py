@@ -225,7 +225,7 @@ class Library(commands.Cog):
                     name,
                     "",
                     0,
-                    "English",
+                    "english",
                     FileHandler.get_tags(name),
                     link,
                     size,
