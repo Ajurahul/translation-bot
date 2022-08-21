@@ -219,7 +219,7 @@ class Library(commands.Cog):
             name = file[1]['a']['n']
             name = bytes(name, encoding="raw_unicode_escape", errors="ignore").decode()
             link = m.get_link(file)
-            await ctx.send()
+            # await ctx.send()
             # await ctx.send(ctx.author.id)
             print(str(size)+str(name)+str(link))
             if link:
