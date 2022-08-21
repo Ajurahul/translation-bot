@@ -253,7 +253,7 @@ class Library(commands.Cog):
     async def progress(self, ctx: commands.Context) -> None:
         await ctx.send(f'In progress {self.bot.progress} of {self.bot.total} completed')
 
-    @library.command(name="delete", help="gives progress")
+    @library.command(name="deletefrom", help="gives progress")
     @has_permissions(administrator=True)
     async def deletefrom(self, ctx: commands.Context, fromId: int) -> None:
         await ctx.send('Started removing novel')
