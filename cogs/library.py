@@ -253,9 +253,8 @@ class Library(commands.Cog):
     async def progress(self, ctx: commands.Context) -> None:
         await ctx.send(f'In progress {self.bot.progress} of {self.bot.total} completed')
 
-    @library.command(name="deletefrom", help="gives progress")
-    @has_permissions(administrator=True)
-    async def deletefrom(self, ctx: commands.Context, fromId: int) -> None:
+    @library.command(name="remove", help="Remove id")
+    async def remove(self, ctx: commands.Context, fromId: int) -> None:
         await ctx.send('Started removing novel')
         for i in range(fromId,self.bot.mongo.library.next_number):
             self.bot.mongo.library.remove_novel(i)
