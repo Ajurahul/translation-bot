@@ -200,13 +200,17 @@ class Library(commands.Cog):
         await self.bot.mongo.library.update_rating(novel._id, rating)
         await ctx.send("Novel reviewed.")
 
+    @has_permissions(administrator=True)
     @library.command(name="add", help="add novels in mega folder")
     async def add(self, ctx: commands.Context) -> None:
         await ctx.send('connecting to mega')
         mega = Mega()
         m = mega.login(os.getenv("MAIL"), os.getenv("MEGA2"))
+        print(m.get_user())
         await ctx.send('Connection established')
-        folder = m.find("novels")[0]
+        folder = m.find('Aug22')[0]
+        # folder=m.find_path_descriptor('Cloud drive/new/doulou')
+        print(folder)
         files = m.get_files_in_node(folder)
         await ctx.send("Got all the files")
         self.bot.total=len(files)
@@ -253,14 +257,15 @@ class Library(commands.Cog):
     async def progress(self, ctx: commands.Context) -> None:
         await ctx.send(f'In progress {self.bot.progress} of {self.bot.total} completed')
 
-    @commands.hybrid_command(
-        help="remove ids"
-    )
-    async def remove(self, ctx: commands.Context, fromId: int) -> None:
-        await ctx.send('Started removing novel')
-        for i in range(775,900):
-            await self.bot.mongo.library.remove_novel(int(i))
-        await ctx.send('Completed')
+    # @has_permissions(administrator=True)
+    # @commands.hybrid_command(
+    #     help="remove ids"
+    # )
+    # async def rem(self, ctx: commands.Context, fromId: int) -> None:
+    #     await ctx.send('Started removing novel')
+    #     for i in range(775,900):
+    #         await self.bot.mongo.library.remove_novel(int(i))
+    #     await ctx.send('Completed')
 
 
 
