@@ -227,7 +227,7 @@ class Library(commands.Cog):
             link = m.get_link(file)
             # await ctx.send()
             # await ctx.send(ctx.author.id)
-            print(str(size)+str(name)+str(link))
+            # print(str(size)+str(name)+str(link))
             if link:
                 novel_data = [
                     await self.bot.mongo.library.next_number,
@@ -243,7 +243,7 @@ class Library(commands.Cog):
                 ]
                 data = Novel(*novel_data)
                 await self.bot.mongo.library.add_novel(data)
-            print(await self.bot.mongo.library.next_number)
+            # print(await self.bot.mongo.library.next_number)
           except Exception as e:
               try:
                   await ctx.send(str(e))
