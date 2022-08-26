@@ -22,6 +22,22 @@ class Library(Database):
         novel = await self.library.find_one({"_id": _id})
         return Novel(**novel) if novel else None
 
+    async def update_title(self, _id: int, title: str) -> None:
+        print(_id)
+        print(title)
+        await self.library.update_one(
+            {"_id": _id}, {"$set": {"title": title}}
+        )
+
+    async def get_title_by_id(self, _id: int) -> Novel:
+        novel = await self.library.find_one({"_id": _id})
+        # print(novel)
+        # print(novel['title'])
+        # for k,v in novel.items():
+        #     print(k)
+        #     print(v)
+        return novel['title']
+
     async def update_novel(self, novel: Novel) -> None:
         await self.library.update_one({"_id": novel._id}, {"$set": novel.__dict__})
 

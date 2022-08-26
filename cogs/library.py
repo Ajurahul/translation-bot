@@ -253,9 +253,26 @@ class Library(commands.Cog):
             # break
             # raise Exception
 
-    @library.command(name="progress", help="gives progress")
-    async def progress(self, ctx: commands.Context) -> None:
+    @library.command(name="megaproc", help="gives progress")
+    async def mprogress(self, ctx: commands.Context) -> None:
         await ctx.send(f'In progress {self.bot.progress} of {self.bot.total} completed')
+
+    @has_permissions(administrator=True)
+    @library.command(name="change", help="change name")
+    async def change(self, ctx: commands.Context) -> None:
+        await ctx.send('Started changing names')
+        for i in range(1, 10455):
+            try:
+                # print(i)
+                title: str = await self.bot.mongo.library.get_title_by_id(i)
+                # print(title)
+                title = title.replace('__', '--').replace('_', ' ').replace('--', '__')
+                # await ctx.send(title)
+                await self.bot.mongo.library.update_title(_id=i, title=title)
+            except Exception as e:
+                print(e)
+                await ctx.send(e)
+        return await ctx.send('done')
 
     # @has_permissions(administrator=True)
     # @commands.hybrid_command(
