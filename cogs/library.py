@@ -208,7 +208,7 @@ class Library(commands.Cog):
         m = mega.login(os.getenv("MAIL"), os.getenv("MEGA2"))
         print(m.get_user())
         await ctx.send('Connection established')
-        folder = m.find('Aug22')[0]
+        folder = m.find('Aug27')[0]
         # folder=m.find_path_descriptor('Cloud drive/new/doulou')
         print(folder)
         files = m.get_files_in_node(folder)
@@ -226,6 +226,7 @@ class Library(commands.Cog):
             name = bytes(name, encoding="raw_unicode_escape", errors="ignore").decode()
             link = m.get_link(file)
             # await ctx.send()
+            print(self.bot.progress)
             # await ctx.send(ctx.author.id)
             # print(str(size)+str(name)+str(link))
             if link:
@@ -253,7 +254,7 @@ class Library(commands.Cog):
             # break
             # raise Exception
 
-    @library.command(name="megaproc", help="gives progress")
+    @library.command(name="prog", help="gives progress")
     async def mprogress(self, ctx: commands.Context) -> None:
         await ctx.send(f'In progress {self.bot.progress} of {self.bot.total} completed')
 
@@ -274,15 +275,15 @@ class Library(commands.Cog):
                 await ctx.send(e)
         return await ctx.send('done')
 
-    # @has_permissions(administrator=True)
-    # @commands.hybrid_command(
-    #     help="remove ids"
-    # )
-    # async def rem(self, ctx: commands.Context, fromId: int) -> None:
-    #     await ctx.send('Started removing novel')
-    #     for i in range(775,900):
-    #         await self.bot.mongo.library.remove_novel(int(i))
-    #     await ctx.send('Completed')
+    @has_permissions(administrator=True)
+    @commands.hybrid_command(
+        help="remove ids"
+    )
+    async def rem(self, ctx: commands.Context) -> None:
+        await ctx.send('Started removing novel')
+        for i in range(10539,10551):
+            await self.bot.mongo.library.remove_novel(int(i))
+        return await ctx.send('Completed')
 
 
 
