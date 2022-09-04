@@ -208,7 +208,7 @@ class Library(commands.Cog):
         m = mega.login(os.getenv("MAIL"), os.getenv("MEGA2"))
         print(m.get_user())
         await ctx.send('Connection established')
-        folder = m.find('Aug27')[0]
+        folder = m.find('njk')[0]
         # folder=m.find_path_descriptor('Cloud drive/new/doulou')
         print(folder)
         files = m.get_files_in_node(folder)
@@ -229,7 +229,7 @@ class Library(commands.Cog):
             print(self.bot.progress)
             # await ctx.send(ctx.author.id)
             # print(str(size)+str(name)+str(link))
-            if link:
+            if link and size > 0.2 * 10**6:
                 novel_data = [
                     await self.bot.mongo.library.next_number,
                     name,
@@ -244,6 +244,7 @@ class Library(commands.Cog):
                 ]
                 data = Novel(*novel_data)
                 await self.bot.mongo.library.add_novel(data)
+                await ctx.send()
             # print(await self.bot.mongo.library.next_number)
           except Exception as e:
               try:
@@ -274,6 +275,22 @@ class Library(commands.Cog):
                 print(e)
                 await ctx.send(e)
         return await ctx.send('done')
+
+    @has_permissions(administrator=True)
+    @library.command(name="getall", help="get all files in Txt")
+    async def getall(self, ctx: commands.Context) -> None:
+        await ctx.send('> Started to get all novel names from library')
+        catalog=''
+        for i in range(1,await self.bot.mongo.library.next_number):
+            print(i ,end="\r")
+            try:
+                title:str =await self.bot.mongo.library.get_title_by_id(i)
+                catalog=catalog+title+"\n"
+            except Exception as e:
+                print(e)
+        with open('catalog.txt',"w",encoding="utf-8",errors='ignore') as file:
+            file.write(catalog)
+        await ctx.send('File',file=discord.File(file))
 
     @has_permissions(administrator=True)
     @commands.hybrid_command(
