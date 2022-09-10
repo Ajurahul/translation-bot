@@ -1,6 +1,7 @@
 import datetime
 import os
 
+import aiofiles
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -205,10 +206,11 @@ class Library(commands.Cog):
     async def add(self, ctx: commands.Context) -> None:
         await ctx.send('connecting to mega')
         mega = Mega()
+        full =''
         m = mega.login(os.getenv("MAIL"), os.getenv("MEGA2"))
         print(m.get_user())
         await ctx.send('Connection established')
-        folder = m.find('njk')[0]
+        folder = m.find('sep10')[0]
         # folder=m.find_path_descriptor('Cloud drive/new/doulou')
         print(folder)
         files = m.get_files_in_node(folder)
@@ -230,8 +232,9 @@ class Library(commands.Cog):
             # await ctx.send(ctx.author.id)
             # print(str(size)+str(name)+str(link))
             if link and size > 0.2 * 10**6:
+                id1 = await self.bot.mongo.library.next_number
                 novel_data = [
-                    await self.bot.mongo.library.next_number,
+                    id1,
                     name,
                     "",
                     0,
@@ -241,10 +244,12 @@ class Library(commands.Cog):
                     size,
                     ctx.author.id,
                     datetime.datetime.utcnow().timestamp(),
+                    "chinese"
                 ]
                 data = Novel(*novel_data)
                 await self.bot.mongo.library.add_novel(data)
-                await ctx.send()
+                # await ctx.send()
+                full = full +"#"+ str(id1) + " - "+ name + "  ----  " + str({round(size/(1024**2), 2)}) + " MB\n"
             # print(await self.bot.mongo.library.next_number)
           except Exception as e:
               try:
@@ -252,8 +257,17 @@ class Library(commands.Cog):
               except :
                   pass
               print(e)
+
+
             # break
             # raise Exception
+        async with aiofiles.open(f"{ctx.author.id}.txt", "w", encoding="utf-8") as f:
+            await f.write(full)
+        file = discord.File(f"{ctx.author.id}.txt", "Uploaded_contents.txt")
+        msg = await ctx.reply("**🎉Here is your crawled novel**", file=file)
+        print(msg.jump_url)
+        print(msg.id)
+        return await ctx.send('done')
 
     @library.command(name="prog", help="gives progress")
     async def mprogress(self, ctx: commands.Context) -> None:
@@ -294,13 +308,24 @@ class Library(commands.Cog):
 
     @has_permissions(administrator=True)
     @commands.hybrid_command(
+        help="gives total no of novel in library"
+    )
+    async def total(self, ctx: commands.Context) -> None:
+        ids = await self.bot.mongo.library.next_number
+        return await ctx.send('Total no. of novel in library : ' +str(ids))
+
+    @has_permissions(administrator=True)
+    @commands.hybrid_command(
         help="remove ids"
     )
     async def rem(self, ctx: commands.Context) -> None:
         await ctx.send('Started removing novel')
-        for i in range(10539,10551):
+        for i in range(12532,100000):
             await self.bot.mongo.library.remove_novel(int(i))
         return await ctx.send('Completed')
+
+
+
 
 
 
