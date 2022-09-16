@@ -152,7 +152,7 @@ class Crawler(commands.Cog):
                 self.bot.crawler[name] = f"{len(novel)}/{len(urls)}"
             return novel
 
-    async def getcoontent(self, links: str, css: str, next_xpath, bot):
+    async def getcoontent(self, links: str, css: str, next_xpath, bot, tag):
         try:
             response = await bot.con.get(links)
             soup = BeautifulSoup(await response.read(), "html.parser",from_encoding=response.get_encoding())
@@ -180,12 +180,14 @@ class Crawler(commands.Cog):
                 return ""
             full_chp = full_chp + "\n".join(text)
         try:
+            if tag:
+                raise Exception
             next_href = sel.xpath(next_xpath + '/@href').extract()[0]
             next_href = urljoin(links, next_href)
         except:
             try:
                 #if css selector is given it will come here due to exception
-                next_href = sel.css(next_xpath).extract
+                next_href = sel.css(next_xpath).extract_first()
                 next_href = urljoin(links, next_href)
             except:
                 next_href = None
@@ -454,7 +456,7 @@ class Crawler(commands.Cog):
         await ctx.reply("> **✔Cleared all records.**")
 
     @commands.hybrid_command(help="Crawls if given 1st,2nd(or selector) and lastpage(or maxchps).use it when there is no TOC page")
-    async def crawler(
+    async def crawlnext(
             self, ctx: commands.Context, firstchplink: str, secondchplink: str = None, lastchplink: str = None, nextselector: str = None, noofchapters: int = None,
             cssselector: str = None
     ) -> typing.Optional[discord.Message]:
@@ -463,7 +465,7 @@ class Crawler(commands.Cog):
                 "> **❌You cannot crawl two novels at the same time.**"
             )
         if secondchplink is None and nextselector is None:
-            return await ctx.send("You must givve second chapter link or next page css selector")
+            return await ctx.send("You must give second chapter link or next page css selector")
         msg = await ctx.send("Crawling will be started soon")
         if cssselector:
             css = cssselector
@@ -473,17 +475,24 @@ class Crawler(commands.Cog):
             css = '* ::text'
         if noofchapters is None:
             noofchapters = 2000
-        if nextselector:
+        try:
+            response = requests.get(firstchplink, headers=headers, timeout=10)
+        except:
+            pass
+        response.encoding = response.apparent_encoding
+        soup = BeautifulSoup(response.content, 'html5lib')
+        htm = response.text
+        sel = parsel.Selector(htm)
+        sel_tag = False
+        if nextselector is not None:
+
+            sel_tag = True
+            if '::attr(href)' not in nextselector:
+                nextselector += ' ::attr(href)'
+            print(nextselector)
             path = nextselector
         else:
-            try:
-                response = requests.get(firstchplink, headers=headers, timeout=10)
-            except:
-                pass
-            response.encoding = response.apparent_encoding
-            soup = BeautifulSoup(response.content, 'html5lib')
-            htm = response.text
-            sel = parsel.Selector(htm)
+
             urls = sel.css('a ::attr(href)').extract()
 
             psrt = ''
@@ -501,12 +510,25 @@ class Crawler(commands.Cog):
         chp_count = 1
         # print(title)
         current_link = firstchplink
-        full_text = ''
+        full_text = "Source : " +firstchplink+'\n\n'
         no_of_tries = 0
         await msg.edit(content="> Crawling started")
+        crawled_urls = []
         for i in range(1, noofchapters):
             self.bot.crawler[ctx.author.id] = f"{i}/{noofchapters}"
-            output = await self.getcoontent(current_link, css, path, self.bot)
+            if current_link in crawled_urls:
+                await msg.delete()
+                if i >= 30:
+                    break
+                del self.bot.crawler[ctx.author.id]
+                if current_link == firstchplink and i < 10:
+                    return await ctx.reply(
+                        'Error occurred . Some problem in the site. please try with second and third chapter or give valid css selector for next page button')
+                if sel_tag:
+                    return await ctx.send(" There is some problem with the provided selector")
+                else:
+                    return await ctx.send(" There is some problem with the detected selector")
+            output = await self.getcoontent(current_link, css, path, self.bot, sel_tag)
             chp_text = output[0]
             # print(i)
             if chp_text =='error':
@@ -517,16 +539,12 @@ class Crawler(commands.Cog):
                     del self.bot.crawler[ctx.author.id]
                     return await ctx.send('Error occured when crawling. Please Report to my developer')
             full_text += chp_text
+            # print(current_link)
             if current_link == lastchplink or i >= noofchapters or output[1] is None:
                 print('break')
                 break
             chp_count += 1
             current_link = output[1]
-            if current_link == firstchplink:
-                del self.bot.crawler[ctx.author.id]
-                await ctx.reply('Error occurred . Some problem in the site. please try with second and third chapter or give valid css selector for next page button')
-                return None
-            # input('g')
         try:
             title = GoogleTranslator(
                 source="auto", target="english"
