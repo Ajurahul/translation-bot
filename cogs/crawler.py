@@ -33,10 +33,10 @@ def findURLCSS(link):
     elif "uukanshu" in link:
         return ".contentbox ::text"
     elif (
-        "trxs.me" in link
-        or "trxs.cc" in link
-        or "qbtr" in link
-        or "tongrenquan" in link
+            "trxs.me" in link
+            or "trxs.cc" in link
+            or "qbtr" in link
+            or "tongrenquan" in link
     ):
         return ".read_chapterDetail p ::text"
     elif "biqugeabc" in link:
@@ -59,11 +59,11 @@ def findURLCSS(link):
 
 def findchptitlecss(link):
     if (
-        "trxs.me" in link
-        or "trxs.cc" in link
-        or "tongrenquan" in link
-        or "qbtr" in link
-        or "jpxs" in link
+            "trxs.me" in link
+            or "trxs.cc" in link
+            or "tongrenquan" in link
+            or "qbtr" in link
+            or "jpxs" in link
     ):
         return [".infos>h1:first-child", ""]
     if "bixiange" in link:
@@ -155,7 +155,7 @@ class Crawler(commands.Cog):
     async def getcoontent(self, links: str, css: str, next_xpath, bot, tag):
         try:
             response = await bot.con.get(links)
-            soup = BeautifulSoup(await response.read(), "html.parser",from_encoding=response.get_encoding())
+            soup = BeautifulSoup(await response.read(), "html.parser", from_encoding=response.get_encoding())
             # response = requests.get(links, headers=headers, timeout=10)
         except:
             return ['error', links]
@@ -186,7 +186,7 @@ class Crawler(commands.Cog):
             next_href = urljoin(links, next_href)
         except:
             try:
-                #if css selector is given it will come here due to exception
+                # if css selector is given it will come here due to exception
                 next_href = sel.css(next_xpath).extract_first()
                 next_href = urljoin(links, next_href)
             except:
@@ -255,7 +255,7 @@ class Crawler(commands.Cog):
             await msg.delete()
             return await ctx.send("We couldn't connect to the provided link. Please check the link")
         novel = {}
-        soup = BeautifulSoup(await res.read(), "html.parser")
+        soup = BeautifulSoup(await res.read(), "html.parser", from_encoding=res.get_encoding())
         data = await res.read()
         soup1 = BeautifulSoup(data, "lxml")
         self.titlecss = findchptitlecss(link)
@@ -346,7 +346,7 @@ class Crawler(commands.Cog):
             #         for j in [str(i.get("href")) for i in soup.find_all("a")]
             #         if "/b/" in j and "txt" not in j
             #     ]
-                # print(urls)
+            # print(urls)
             elif "t.uukanshu" in link:
                 surl = "/t.uukanshu.com/"
                 urls = [
@@ -355,11 +355,11 @@ class Crawler(commands.Cog):
                     if "read.aspx?tid" in j and "txt" not in j
                 ]
         if (
-            "uukanshu" in link
-            and "sj.uukanshu" not in link
-            and "t.uukanshu" not in link
-            and "uukanshu.cc" not in link
-            and not urls == []
+                "uukanshu" in link
+                and "sj.uukanshu" not in link
+                and "t.uukanshu" not in link
+                and "uukanshu.cc" not in link
+                and not urls == []
         ):
             urls = urls[::-1]
         if urls == [] or num == len(allowed) or len(urls) < 30:
@@ -416,32 +416,37 @@ class Crawler(commands.Cog):
             )
         if reverse is not None:
             urls.reverse()
-        self.bot.crawler[ctx.author.id] = f"0/{len(urls)}"
-        await msg.edit(content="> **✔Crawl started.**")
-        if title_name == "" or title_name == "None" or title_name is None:
-            title_name = f"{ctx.author.id}_crl"
-        else:
-            try:
-                title_name = GoogleTranslator(
-                    source="auto", target="english"
-                ).translate(title_name).strip()
-            except:
-                pass
-        title = str(title_name[:100])
-        for tag in ['/', '\\', '<', '>', "'", '"', ':', ";", '?', '|', '*', ';', '\r', '\n', '\t', '\\\\']:
-            title = title.replace(tag, '')
-        title = title.replace('_', ' ')
-        book = await self.bot.loop.run_in_executor(
-            None, self.direct, urls, novel, ctx.author.id
-        )
-        parsed = {k: v for k, v in sorted(book.items(), key=lambda item: item[0])}
-        whole = [i for i in list(parsed.values())]
-        whole.insert(0, "\nsource : " + str(link) + "\n\n")
-        text = "\n".join(whole)
-        original_Language = FileHandler.find_language(text)
-        async with aiofiles.open(f"{title}.txt", "w", encoding="utf-8") as f:
-            await f.write(text)
-        await FileHandler().crawlnsend(ctx, self.bot, title, title_name, original_Language)
+        try:
+            self.bot.crawler[ctx.author.id] = f"0/{len(urls)}"
+            await msg.edit(content="> **✔Crawl started.**")
+            if title_name == "" or title_name == "None" or title_name is None:
+                title_name = f"{ctx.author.id}_crl"
+            else:
+                try:
+                    title_name = GoogleTranslator(
+                        source="auto", target="english"
+                    ).translate(title_name).strip()
+                except:
+                    pass
+            title = str(title_name[:100])
+            for tag in ['/', '\\', '<', '>', "'", '"', ':', ";", '?', '|', '*', ';', '\r', '\n', '\t', '\\\\']:
+                title = title.replace(tag, '')
+            title = title.replace('_', ' ')
+            book = await self.bot.loop.run_in_executor(
+                None, self.direct, urls, novel, ctx.author.id
+            )
+            parsed = {k: v for k, v in sorted(book.items(), key=lambda item: item[0])}
+            whole = [i for i in list(parsed.values())]
+            whole.insert(0, "\nsource : " + str(link) + "\n\n")
+            text = "\n".join(whole)
+            original_Language = FileHandler.find_language(text)
+            async with aiofiles.open(f"{title}.txt", "w", encoding="utf-8") as f:
+                await f.write(text)
+            await FileHandler().crawlnsend(ctx, self.bot, title, title_name, original_Language)
+        except Exception as e:
+            raise e
+        finally:
+            del self.bot.crawler[ctx.author.id]
 
     @commands.hybrid_command(
         help="Clears any stagnant novels which were deposited for crawling."
@@ -455,9 +460,11 @@ class Crawler(commands.Cog):
                 os.remove(i)
         await ctx.reply("> **✔Cleared all records.**")
 
-    @commands.hybrid_command(help="Crawls if given 1st,2nd(or selector) and lastpage(or maxchps).use it when there is no TOC page")
+    @commands.hybrid_command(
+        help="Crawls if given 1st,2nd(or selector) and lastpage(or maxchps).use it when there is no TOC page")
     async def crawlnext(
-            self, ctx: commands.Context, firstchplink: str, secondchplink: str = None, lastchplink: str = None, nextselector: str = None, noofchapters: int = None,
+            self, ctx: commands.Context, firstchplink: str, secondchplink: str = None, lastchplink: str = None,
+            nextselector: str = None, noofchapters: int = None,
             cssselector: str = None
     ) -> typing.Optional[discord.Message]:
         if ctx.author.id in self.bot.crawler:
@@ -502,7 +509,8 @@ class Crawler(commands.Cog):
                     psrt = url
             if psrt == '':
                 await msg.delete()
-                await ctx.send("We couldn't find the selector for next chapter. Please check the links or provide the css selector")
+                await ctx.send(
+                    "We couldn't find the selector for next chapter. Please check the links or provide the css selector")
             href = [i for i in soup.find_all("a") if i.get("href") == psrt]
             # print(href)
             path = self.xpath_soup(href[0])
@@ -510,55 +518,61 @@ class Crawler(commands.Cog):
         chp_count = 1
         # print(title)
         current_link = firstchplink
-        full_text = "Source : " +firstchplink+'\n\n'
+        full_text = "Source : " + firstchplink + '\n\n'
         no_of_tries = 0
         await msg.edit(content="> Crawling started")
         crawled_urls = []
-        for i in range(1, noofchapters):
-            self.bot.crawler[ctx.author.id] = f"{i}/{noofchapters}"
-            if current_link in crawled_urls:
-                await msg.delete()
-                if i >= 30:
-                    break
-                del self.bot.crawler[ctx.author.id]
-                if current_link == firstchplink and i < 10:
-                    return await ctx.reply(
-                        'Error occurred . Some problem in the site. please try with second and third chapter or give valid css selector for next page button')
-                if sel_tag:
-                    return await ctx.send(" There is some problem with the provided selector")
-                else:
-                    return await ctx.send(" There is some problem with the detected selector")
-            output = await self.getcoontent(current_link, css, path, self.bot, sel_tag)
-            chp_text = output[0]
-            # print(i)
-            if chp_text =='error':
-                no_of_tries += 1
-                chp_text = ''
-                if no_of_tries > 30:
-                    await msg.delete()
-                    del self.bot.crawler[ctx.author.id]
-                    return await ctx.send('Error occured when crawling. Please Report to my developer')
-            full_text += chp_text
-            # print(current_link)
-            if current_link == lastchplink or i >= noofchapters or output[1] is None:
-                print('break')
-                break
-            chp_count += 1
-            current_link = output[1]
         try:
-            title = GoogleTranslator(
-                source="auto", target="english"
-            ).translate(title).strip()
-        except:
-            pass
-        title_name = title
-        title = str(title[:100])
-        for tag in ['/', '\\', '<', '>', "'", '"', ':', ";", '?', '|', '*', ';', '\r', '\n', '\t', '\\\\']:
-            title = title.replace(tag, '')
-        with open(title + '.txt', 'w', encoding='utf-8') as f:
-            f.write(full_text)
-        original_Language = FileHandler.find_language(full_text)
-        return await FileHandler().crawlnsend(ctx, self.bot, title, title_name, original_Language)
+            for i in range(1, noofchapters):
+                self.bot.crawler[ctx.author.id] = f"{i}/{noofchapters}"
+                if current_link in crawled_urls:
+                    await msg.delete()
+                    if i >= 30:
+                        break
+                    del self.bot.crawler[ctx.author.id]
+                    if current_link == firstchplink and i < 10:
+                        return await ctx.reply(
+                            'Error occurred . Some problem in the site. please try with second and third chapter or give valid css selector for next page button')
+                    if sel_tag:
+                        return await ctx.send(" There is some problem with the provided selector")
+                    else:
+                        return await ctx.send(" There is some problem with the detected selector")
+                output = await self.getcoontent(current_link, css, path, self.bot, sel_tag)
+                chp_text = output[0]
+                # print(i)
+                if chp_text == 'error':
+                    no_of_tries += 1
+                    chp_text = ''
+                    if no_of_tries > 30:
+                        await msg.delete()
+                        del self.bot.crawler[ctx.author.id]
+                        return await ctx.send('Error occured when crawling. Please Report to my developer')
+                full_text += chp_text
+                # print(current_link)
+                if current_link == lastchplink or i >= noofchapters or output[1] is None:
+                    print('break')
+                    break
+                chp_count += 1
+                current_link = output[1]
+            try:
+                title = GoogleTranslator(
+                    source="auto", target="english"
+                ).translate(title).strip()
+            except:
+                pass
+            title_name = title
+            title = str(title[:100])
+            for tag in ['/', '\\', '<', '>', "'", '"', ':', ";", '?', '|', '*', ';', '\r', '\n', '\t', '\\\\']:
+                title = title.replace(tag, '')
+            with open(title + '.txt', 'w', encoding='utf-8') as f:
+                f.write(full_text)
+            original_Language = FileHandler.find_language(full_text)
+            return await FileHandler().crawlnsend(ctx, self.bot, title, title_name, original_Language)
+        except Exception as e:
+            raise e
+        finally:
+            del self.bot.crawler[ctx.author.id]
+
 
 async def setup(bot: Raizel) -> None:
     await bot.add_cog(Crawler(bot))
