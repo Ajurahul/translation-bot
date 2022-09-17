@@ -177,7 +177,5 @@ class Translate(commands.Cog):
         await ctx.reply("> **✔Cleared all records.**")
 
 
-
-
 async def setup(bot):
     await bot.add_cog(Translate(bot))
