@@ -51,6 +51,7 @@ class Admin(commands.Cog):
     async def unban(self, ctx: commands.Context, id: str):
         id = int(id)
         user = self.bot.get_user(id)
+
         await user.send(embed=discord.Embed(
             title="Congrats",
             description=f" You have been unbanned by admins. Please follow the guidelines in future",
@@ -72,6 +73,12 @@ class Admin(commands.Cog):
             description=f" You have been warned by admins of @JARVIS bot due to {reason}\nIf you continue do so , you will be banned from using bot",
             color=discord.Color.yellow(),
         ))
+
+    @commands.has_role(1020638168237740042)
+    @commands.hybrid_command(help="send warning to user")
+    async def get_id(self, ctx: commands.Context, name: str, discriminator: str):
+        user = discord.utils.get(self.bot.get_all_members(), name=name, discriminator=discriminator)
+        await ctx.send(f"{user.id}")
 
     @commands.has_role(1020638168237740042)
     @commands.hybrid_command()
