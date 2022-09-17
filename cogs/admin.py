@@ -51,7 +51,6 @@ class Admin(commands.Cog):
     async def unban(self, ctx: commands.Context, id: str):
         id = int(id)
         user = self.bot.get_user(id)
-
         await user.send(embed=discord.Embed(
             title="Congrats",
             description=f" You have been unbanned by admins. Please follow the guidelines in future",
