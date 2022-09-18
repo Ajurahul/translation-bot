@@ -100,10 +100,9 @@ class Admin(commands.Cog):
     @commands.hybrid_command(help="Gives the logger for debug")
     async def logger(self, ctx: commands.Context, lines: int = 20):
         h = heroku3.from_key(os.getenv("APIKEY"))
-        log = h.get_app_log(os.getenv("APPNAME"),lines=lines,timeout=10)
-        return await ctx.send(embeds=discord.Embed(title="Logs",description=log,timestamp=datetime.datetime.utcnow().timestamp()))
+        log = h.get_app_log(os.getenv("APPNAME"), lines=lines, timeout=10)
+        return await ctx.send(embed=discord.Embed(title="Logs", description=str(log)))
         # app = h.app(os.getenv("APPNAME"))
-
 
 
 async def setup(bot):
