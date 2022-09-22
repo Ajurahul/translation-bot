@@ -277,12 +277,12 @@ class Library(commands.Cog):
     @library.command(name="change", help="change name")
     async def change(self, ctx: commands.Context) -> None:
         await ctx.send('Started changing names')
-        for i in range(1, 10455):
+        for i in range(1, await self.bot.mongo.library.next_number):
             try:
                 # print(i)
                 title: str = await self.bot.mongo.library.get_title_by_id(i)
                 # print(title)
-                title = title.replace('__', '--').replace('_', ' ').replace('--', '__')
+                title = title.replace('.docx', '').replace('.txt','').replace('.epub', '').strip()
                 # await ctx.send(title)
                 await self.bot.mongo.library.update_title(_id=i, title=title)
             except Exception as e:
