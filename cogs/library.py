@@ -210,7 +210,7 @@ class Library(commands.Cog):
         m = mega.login(os.getenv("MAIL"), os.getenv("MEGA2"))
         print(m.get_user())
         await ctx.send('Connection established')
-        folder = m.find('sep10')[0]
+        folder = m.find('sep19')[0]
         # folder=m.find_path_descriptor('Cloud drive/new/doulou')
         print(folder)
         files = m.get_files_in_node(folder)
@@ -235,7 +235,7 @@ class Library(commands.Cog):
                 id1 = await self.bot.mongo.library.next_number
                 novel_data = [
                     id1,
-                    name,
+                    name.replace(".txt", "").replace(".docx", "").replace(".epub", ""),
                     "",
                     0,
                     "english",
@@ -244,7 +244,7 @@ class Library(commands.Cog):
                     size,
                     ctx.author.id,
                     datetime.datetime.utcnow().timestamp(),
-                    "chinese"
+                    "chinese (simplified)"
                 ]
                 data = Novel(*novel_data)
                 await self.bot.mongo.library.add_novel(data)
@@ -264,7 +264,7 @@ class Library(commands.Cog):
         async with aiofiles.open(f"{ctx.author.id}.txt", "w", encoding="utf-8") as f:
             await f.write(full)
         file = discord.File(f"{ctx.author.id}.txt", "Uploaded_contents.txt")
-        msg = await ctx.reply("**🎉Here is your crawled novel**", file=file)
+        msg = await ctx.reply("**🎉Here is list of uploaded novels", file=file)
         print(msg.jump_url)
         print(msg.id)
         return await ctx.send('done')
