@@ -232,7 +232,8 @@ class Crawler(commands.Cog):
             self, ctx: commands.Context, link: str = None, reverse: str = None, selector: str = None,
             translate_to: str = None
     ) -> typing.Optional[discord.Message]:
-        if ctx.author.id in self.bot.crawler and 1020638168237740042 not in ctx.author.roles:
+        if ctx.author.id in self.bot.crawler and self.bot.get_guild(940866934214373376).get_role(1020638168237740042) not in ctx.author.roles:
+            p
             return await ctx.reply(
                 "> **❌You cannot crawl two novels at the same time.**"
             )
