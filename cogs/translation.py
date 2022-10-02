@@ -57,7 +57,7 @@ class Translate(commands.Cog):
                 f"**❌We have the following languages in our db.**\n```ini\n{self.bot.display_langs}```"
             )
         language = FileHandler.get_language(language)
-        if ctx.author.id in self.bot.translator:
+        if ctx.author.id in self.bot.translator and 1020638168237740042 not in ctx.author.roles:
             return await ctx.send("> **❌You cannot translate two novels at a time.**", ephemeral=True)
         if not ctx.message.attachments and not file and messageid is None:
             return await ctx.send("> **❌You must add a novel/link to translate**", ephemeral=True)

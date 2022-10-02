@@ -232,7 +232,7 @@ class Crawler(commands.Cog):
             self, ctx: commands.Context, link: str = None, reverse: str = None, selector: str = None,
             translate_to: str = None
     ) -> typing.Optional[discord.Message]:
-        if ctx.author.id in self.bot.crawler:
+        if ctx.author.id in self.bot.crawler and 1020638168237740042 not in ctx.author.roles:
             return await ctx.reply(
                 "> **❌You cannot crawl two novels at the same time.**"
             )
@@ -540,7 +540,7 @@ class Crawler(commands.Cog):
             nextselector: str = None, noofchapters: int = None,
             cssselector: str = None
     ) -> typing.Optional[discord.Message]:
-        if ctx.author.id in self.bot.crawler:
+        if ctx.author.id in self.bot.crawler and 1020638168237740042 not in ctx.author.roles:
             return await ctx.reply(
                 "> **❌You cannot crawl two novels at the same time.**"
             )
