@@ -263,20 +263,22 @@ class FileHandler:
                 os.remove(f"{title}.txt")
             except:
                 pass
+
         if download_url and size > 0.3 * 10 ** 6:
-            novel_data = [
-                await bot.mongo.library.next_number,
-                title_name,
-                "",
-                0,
-                originallanguage,
-                self.get_tags(title_name),
-                download_url,
-                size,
-                ctx.author.id,
-                datetime.datetime.utcnow().timestamp(),
-                originallanguage,
-            ]
-            data = Novel(*novel_data)
-            await bot.mongo.library.add_novel(data)
+            pass
+            # novel_data = [
+            #     await bot.mongo.library.next_number,
+            #     title_name,
+            #     "",
+            #     0,
+            #     originallanguage,
+            #     self.get_tags(title_name),
+            #     download_url,
+            #     size,
+            #     ctx.author.id,
+            #     datetime.datetime.utcnow().timestamp(),
+            #     originallanguage,
+            # ]
+            # data = Novel(*novel_data)
+            # await bot.mongo.library.add_novel(data)
         return download_url
