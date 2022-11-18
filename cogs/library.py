@@ -1,4 +1,6 @@
+import dataclasses
 import datetime
+import json
 import random
 
 import discord
@@ -299,6 +301,26 @@ class Library(commands.Cog):
         )
         await self.bot.mongo.library.update_rating(novel._id, rating)
         await ctx.send("Novel reviewed.")
+
+    @library.command(help="get all novels")
+    async def getall(self, ctx: commands.Context):
+        try:
+            print("started")
+            nov = await self.bot.mongo.library.get_all_novels
+            json_data = json.dumps(nov, cls=EnhancedJSONEncoder)
+            with open("novels_json.json", "w", encoding="utf-8", errors="ignore") as f:
+                f.write(json_data)
+            print("completed")
+        except Exception as e:
+            print(e)
+
+
+class EnhancedJSONEncoder(json.JSONEncoder):
+
+    def default(self, o):
+        if dataclasses.is_dataclass(o):
+            return dataclasses.asdict(o)
+        return super().default(o)
 
 
 async def setup(bot: Raizel) -> None:
