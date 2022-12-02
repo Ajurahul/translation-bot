@@ -191,11 +191,11 @@ class ErrorHandler(commands.Cog):
                     color=discord.Color.red(),
                 ),
             )
-            h = heroku3.from_key(os.getenv("APIKEY"))
-            app = h.app(os.getenv("APPNAME"))
-            await ctx.send("> Bot is restarting... please try after 30 sec....")
-            await ctx.send("Google api's are down for now . please try later ")
-            app.restart()
+            # h = heroku3.from_key(os.getenv("APIKEY"))
+            # app = h.app(os.getenv("APPNAME"))
+            # await ctx.send("> Bot is restarting... please try after 30 sec....")
+            # await ctx.send("Google api's are down for now . please try later ")
+            # app.restart()
             channel = self.bot.get_channel(
                 991911644831678484
             ) or await self.bot.fetch_channel(991911644831678484)
@@ -222,10 +222,10 @@ class ErrorHandler(commands.Cog):
                 )
             except:
                 pass
-            h = heroku3.from_key(os.getenv("APIKEY"))
-            app = h.app(os.getenv("APPNAME"))
-            await ctx.send("> Bot is restarting... please try after 30 sec....")
-            app.restart()
+            # h = heroku3.from_key(os.getenv("APIKEY"))
+            # app = h.app(os.getenv("APPNAME"))
+            # await ctx.send("> Bot is restarting... please try after 30 sec....")
+            # app.restart()
         elif "CloudflareChallengeError" in str(error):
             await ctx.send(embed=discord.Embed(description="Error occured in bypassing cloudflare challenge. This site is not supported by bot for now.", colour=discord.Color.red()))
         else:
