@@ -187,7 +187,7 @@ class Crawler(commands.Cog):
         try:
             if driver is not None:
                 driver.get(links)
-                soup = BeautifulSoup(driver.page_source)
+                soup = BeautifulSoup(driver.page_source, "html.parser")
             elif scraper is not None:
                 response = await self.bot.loop.run_in_executor(None, self.scrape, scraper, links)
                 response.encoding = response.apparent_encoding
@@ -1021,10 +1021,11 @@ class Crawler(commands.Cog):
             htm = response.text
 
         else:
-            soup = BeautifulSoup(driver.page_source)
+            soup = BeautifulSoup(driver.page_source, "html.parser")
             htm = driver.page_source
         sel = parsel.Selector(htm)
         sel_tag = False
+        path = ""
         if 'b.faloo' in firstchplink or 'wap.faloo' in firstchplink:
             noofchapters = 150
         if secondchplink is None and nextselector is None:
@@ -1096,6 +1097,7 @@ class Crawler(commands.Cog):
         if (title is None or title == "") and headless:
             title = driver.title
         chp_count = 1
+        scraper = None
         # print(title)
         if "69shu" in firstchplink:
             title = title.split("-")[0]
