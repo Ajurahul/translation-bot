@@ -967,8 +967,9 @@ class Crawler(commands.Cog):
                 res = await self.bot.con.get(firstchplink)
                 # print(await res.text())
             except Exception as e:
-                print(e)
-                return await ctx.send("We couldn't connect to the provided link. Please check the link")
+                headless = True
+                driver = get_driver()
+                # return await ctx.send("We couldn't connect to the provided link. Please check the link")
         else:
             driver = get_driver()
         if secondchplink in self.bot.all_langs:
@@ -1007,12 +1008,16 @@ class Crawler(commands.Cog):
                 await ctx.send("Cloudscrape is turned ON", delete_after=8)
                 await asyncio.sleep(0.25)
             else:
-                scraper = None
                 response = requests.get(firstchplink, headers=headers, timeout=20)
         except Exception as e:
-            print(e)
-            return await ctx.reply(
-                "> Couldn't connect to the provided link.... Please check the link")
+            if not headless:
+                return await ctx.reply(
+                    "> Couldn't connect to the provided link.... Please check the link")
+            else:
+                headless = True
+                driver = get_driver()
+                driver.get(firstchplink)
+
         if not headless:
             if response.status_code == 404:
                 return await ctx.reply("> Provided link gives 404 error... Please check the link")
