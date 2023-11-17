@@ -1316,6 +1316,11 @@ class Crawler(commands.Cog):
             await ctx.send("> Error occurred .Please report to admin +\n" + str(e))
             raise e
         finally:
+            if driver is not None:
+                try:
+                    driver.close()
+                except:
+                    pass
             try:
                 del full_text
             except:
