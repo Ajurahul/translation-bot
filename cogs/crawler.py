@@ -931,10 +931,10 @@ class Crawler(commands.Cog):
                 # print(await res.text())
             except Exception as e:
                 headless = True
-                driver = get_driver()
+                driver = await self.bot.loop.run_in_executor(None, get_driver)
                 # return await ctx.send("We couldn't connect to the provided link. Please check the link")
         else:
-            driver = get_driver()
+            driver = await self.bot.loop.run_in_executor(None, get_driver)
         if secondchplink in self.bot.all_langs:
             translate_to = secondchplink
             secondchplink = None
@@ -978,7 +978,7 @@ class Crawler(commands.Cog):
                     "> Couldn't connect to the provided link.... Please check the link")
             else:
                 headless = True
-                driver = get_driver()
+                driver = await self.bot.loop.run_in_executor(None, get_driver)
                 driver.get(firstchplink)
 
         if not headless:
@@ -1179,7 +1179,7 @@ class Crawler(commands.Cog):
                 if current_link in crawled_urls:
                     repeats += 1
                     driver.close()
-                    driver = get_driver()
+                    driver = await self.bot.loop.run_in_executor(None, get_driver)
                 if current_link in crawled_urls and repeats > 5:
                     if i >= 30:
                         break
@@ -1210,7 +1210,7 @@ class Crawler(commands.Cog):
                     chp_text = ''
                     if no_of_tries % 2 != 0:
                         driver.close()
-                        driver = get_driver()
+                        driver = await self.bot.loop.run_in_executor(None, get_driver)
                     if no_of_tries > 30:
                         # await msg.delete()
                         del self.bot.crawler_next[ctx.author.id]
