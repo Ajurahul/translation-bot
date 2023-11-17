@@ -19,11 +19,15 @@ import parsel
 import requests
 from StringProgressBar import progressBar
 
+from selenium.webdriver.chrome.options import Options
+from selenium import webdriver
+
 from bs4 import BeautifulSoup
 from deep_translator import GoogleTranslator
 from discord import app_commands
 from discord.ext import commands
 from readabilipy import simple_json_from_html_string
+from selenium.webdriver.chrome.webdriver import WebDriver
 
 from cogs.admin import Admin
 from cogs.translation import Translate
@@ -56,6 +60,15 @@ async def find_urls(soup, link, name):
     return urls
 
 
+def get_driver():
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("window-size=1400,1500")
+
+    driver = webdriver.Chrome(options=options)
+    return driver
+
+
 class Crawler(commands.Cog):
     def __init__(self, bot: Raizel) -> None:
         self.titlecss = None
@@ -64,12 +77,15 @@ class Crawler(commands.Cog):
         self.bot = bot
 
     @staticmethod
-    def easy(nums: int, links: str, css: str, chptitleCSS: str, scraper) -> t.Tuple[int, str]:
+    def easy(nums: int, links: str, css: str, chptitleCSS: str, scraper, headless: bool) -> t.Tuple[int, str]:
         response = None
         retry_attempts = 2
         for _ in range(retry_attempts):
             try:
-                if scraper is not None:
+                if headless:
+                    driver = get_driver()
+                    driver.get(links)
+                elif scraper is not None:
                     response = scraper.get(links, headers=FileHandler.get_handler(), timeout=20)
                 else:
                     response = requests.get(links, headers=FileHandler.get_handler(), timeout=20)
@@ -80,14 +96,18 @@ class Crawler(commands.Cog):
                 break
         else:
             return nums, f"\ncouldn't get connection to {links}\n"
-        if response.status_code == 404:
+        if response.status_code == 404 and not headless:
             print("Response received as error status code 404")
             return nums, "\n----x---\n"
-        response.encoding = response.apparent_encoding
+        if not headless:
+            response.encoding = response.apparent_encoding
         full = ""
         if '* ::text' == css or css is None or css.strip() == '':
             try:
-                article = simple_json_from_html_string(response.text)
+                if not headless:
+                    article = simple_json_from_html_string(response.text)
+                else:
+                    article = simple_json_from_html_string(driver.page_source)
                 text = article['plain_text']
                 chpTitle = article['title']
                 # print(chpTitle)
@@ -97,7 +117,11 @@ class Crawler(commands.Cog):
                 full = ""
 
         if full == "":
-            html = response.text
+            if not headless:
+                html = response.text
+            else:
+                html = driver.page_source
+                driver.close()
             # if "69shu" in links:
             #     soup = BeautifulSoup(response.text, "html.parser", from_encoding=response.encoding)
             #     sel = parsel.Selector(str(soup))
@@ -138,7 +162,7 @@ class Crawler(commands.Cog):
         else:
             return 8
 
-    def direct(self, urls: t.List[str], novel: t.Dict[int, str], name: int, cloudscrape: bool, tasks: int = 8) -> dict:
+    def direct(self, urls: t.List[str], novel: t.Dict[int, str], name: int, cloudscrape: bool, tasks: int = 8, headless: bool = False) -> dict:
         if cloudscrape:
             scraper = cloudscraper.CloudScraper(delay=10)
         else:
@@ -146,7 +170,7 @@ class Crawler(commands.Cog):
         workers = self.get_workers(tasks)
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             futures = [
-                executor.submit(self.easy, i, j, self.urlcss, self.chptitlecss, scraper)
+                executor.submit(self.easy, i, j, self.urlcss, self.chptitlecss, scraper, headless)
                 for i, j in enumerate(urls)
             ]
             for future in concurrent.futures.as_completed(futures):
@@ -159,9 +183,12 @@ class Crawler(commands.Cog):
                 self.bot.crawler[name] = f"{len(novel)}/{len(urls)}"
             return novel
 
-    async def getcontent(self, links: str, css: str, next_xpath, bot, tag, scraper, next_chp_finder: bool = False):
+    async def getcontent(self, links: str, css: str, next_xpath, bot, tag, scraper, next_chp_finder: bool = False, driver: WebDriver = None):
         try:
-            if scraper is not None:
+            if driver is not None:
+                driver.get(links)
+                soup = BeautifulSoup(driver.page_source)
+            elif scraper is not None:
                 response = await self.bot.loop.run_in_executor(None, self.scrape, scraper, links)
                 response.encoding = response.apparent_encoding
                 soup = BeautifulSoup(response.text, "html.parser", from_encoding=response.encoding)
@@ -325,7 +352,7 @@ class Crawler(commands.Cog):
     async def crawl(
             self, ctx: commands.Context, link: str, translate_to: str = None, reverse: str = None, selector: str = None,
             add_terms: str = None,
-            max_chapters: int = None,
+            max_chapters: int = None, headless: bool = False
     ) -> typing.Optional[discord.Message]:
         """Crawl sites for novel
                Parameters
@@ -344,6 +371,8 @@ class Crawler(commands.Cog):
                     if you want terms to be added when translating
                max_chapters :
                     number of chapters to be crawled.
+               headless :
+                    use headless browser for crawling
                """
         await ctx.defer()
         if ctx.author.id in self.bot.crawler:
@@ -354,6 +383,7 @@ class Crawler(commands.Cog):
             return await ctx.reply(
                 f"> Bot is scheduled to restart within 60 sec or after all current tasks are completed.. Please try after bot is restarted")
         cloudscrape: bool = False
+        driver = None
         if link is None:
             return await ctx.reply(f"> **❌Enter a link for crawling.**")
         allowed = self.bot.allowed
@@ -408,19 +438,28 @@ class Crawler(commands.Cog):
             soup = BeautifulSoup(response.text, "html.parser", from_encoding=response.encoding)
             soup1 = soup
             if int(str(response.status_code)[0]) == 4:
-                return await ctx.send(
-                    f"couldn't connect to the provided link. its returning {response.status_code} error")
+                headless = True
+                cloudscrape = False
             else:
                 await ctx.send("> **Cloudflare is detected.. Turned on  the cloudscraper**", delete_after=10)
         else:
             soup = BeautifulSoup(await res.read(), "html.parser", from_encoding=res.get_encoding())
             data = await res.read()
             soup1 = BeautifulSoup(data, "lxml", from_encoding=res.get_encoding())
-
+        if headless:
+            driver = get_driver()
+            driver.get(link)
+            soup = BeautifulSoup(driver.page_source)
+            soup1 = soup
+            if soup is None:
+                return await ctx.send(
+                    f"couldn't connect to the provided link. its returning error")
         self.titlecss = CssSelector.findchptitlecss(link)
         maintitleCSS = self.titlecss[0]
         try:
             title_name = str(soup1.select(maintitleCSS)[0].text)
+            if headless:
+                title_name = driver.title
             if title_name == "" or title_name is None:
                 raise Exception
         except Exception as e:
@@ -589,6 +628,9 @@ class Crawler(commands.Cog):
                 if cloudscrape:
                     response = scraper.get(next_link, timeout=10)
                     soup = BeautifulSoup(response.text, "html.parser")
+                elif headless:
+                    driver.get(next_link)
+                    soup = BeautifulSoup(driver.page_source)
                 else:
                     response = await self.bot.con.get(next_link)
                     soup = BeautifulSoup(await response.read(), "html.parser")
@@ -709,7 +751,7 @@ class Crawler(commands.Cog):
                 await ctx.reply(content=f"> Updating {str(library)} with name : {title_name}")
             if len(urls) < 1700:
                 book = await self.bot.loop.run_in_executor(
-                    None, self.direct, urls, novel, ctx.author.id, cloudscrape, len(asyncio.all_tasks())
+                    None, self.direct, urls, novel, ctx.author.id, cloudscrape, len(asyncio.all_tasks(), headless)
                 )
                 if book is None:
                     return await ctx.reply("Crawling stopped")
@@ -741,7 +783,7 @@ class Crawler(commands.Cog):
                     await ctx.reply(content=f"> Crawling {str(cnt)} chunks out of {str(len(chunks))}... use .tcp to "
                                             f"check progress")
                     book = await self.bot.loop.run_in_executor(
-                        None, self.direct, chunk, novel, ctx.author.id, cloudscrape, len(asyncio.all_tasks()) + 1
+                        None, self.direct, chunk, novel, ctx.author.id, cloudscrape, len(asyncio.all_tasks()) + 1, driver
                     )
                     if book is None:
                         return await ctx.reply("Crawling stopped")
@@ -773,8 +815,17 @@ class Crawler(commands.Cog):
                 except:
                     pass
             title = title[:100]
+            if driver is not None:
+                try:
+                    driver.close()
+                    driver = None
+                except:
+                    pass
             try:
-                task.cancel()
+                try:
+                    task.cancel()
+                except:
+                    pass
                 view = None
                 embed.set_field_at(index=0,
                                    name=f"Progress :  100%",
@@ -796,6 +847,11 @@ class Crawler(commands.Cog):
             print(traceback.format_exc())
             raise e
         finally:
+            if driver is not None:
+                try:
+                    driver.close()
+                except:
+                    pass
             try:
                 del text
                 del whole
@@ -862,7 +918,7 @@ class Crawler(commands.Cog):
     async def crawlnext(
             self, ctx: commands.Context, firstchplink: str, secondchplink: str = None, lastchplink: str = None,
             nextselector: str = None, noofchapters: int = None,
-            cssselector: str = None, waittime: float = None, translate_to: str = None, add_terms: str = None
+            cssselector: str = None, waittime: float = None, translate_to: str = None, add_terms: str = None, headless: bool = False
     ) -> typing.Optional[discord.Message]:
         """crawl using first chapter link
                 Parameters
@@ -887,11 +943,14 @@ class Crawler(commands.Cog):
                     add terms to  finished novel
                 translate_to :
                     translate automatically after crawling
+                headless :
+                    use headless browsr for crawling
                 """
         try:
             await ctx.defer()
         except:
             pass
+        driver = None
         if ctx.author.id in self.bot.crawler_next:
             return await ctx.reply(
                 "> **❌You cannot crawl two novels at the same time.**"
@@ -903,17 +962,21 @@ class Crawler(commands.Cog):
         cloudscrape: bool = False
         if "m.45zw.com" in firstchplink:
             firstchplink = firstchplink.replace("m.45zw.com", "www.45zw.com")
-        try:
-            res = await self.bot.con.get(firstchplink)
-            # print(await res.text())
-        except Exception as e:
-            print(e)
-            return await ctx.send("We couldn't connect to the provided link. Please check the link")
+        if not headless:
+            try:
+                res = await self.bot.con.get(firstchplink)
+                # print(await res.text())
+            except Exception as e:
+                print(e)
+                return await ctx.send("We couldn't connect to the provided link. Please check the link")
+        else:
+            driver = get_driver()
         if secondchplink in self.bot.all_langs:
             translate_to = secondchplink
             secondchplink = None
-        if int(str(res.status)[0]) == 4:
-            cloudscrape = True
+        if not headless:
+            if int(str(res.status)[0]) == 4:
+                cloudscrape = True
         if nextselector is None:
             nextsel = CssSelector.find_next_selector(firstchplink)
             if nextsel[0] == "None":
@@ -936,7 +999,9 @@ class Crawler(commands.Cog):
         if noofchapters is None:
             noofchapters = 3000
         try:
-            if cloudscrape:
+            if headless:
+                driver.get(firstchplink)
+            elif cloudscrape:
                 scraper = cloudscraper.CloudScraper(delay=10)
                 response = scraper.get(firstchplink, headers=FileHandler.get_handler(), timeout=20)
                 await ctx.send("Cloudscrape is turned ON", delete_after=8)
@@ -948,15 +1013,20 @@ class Crawler(commands.Cog):
             print(e)
             return await ctx.reply(
                 "> Couldn't connect to the provided link.... Please check the link")
-        if response.status_code == 404:
-            return await ctx.reply("> Provided link gives 404 error... Please check the link")
-        if 'b.faloo' in firstchplink or 'wap.faloo' in firstchplink:
-            noofchapters = 150
-        response.encoding = response.apparent_encoding
-        soup = BeautifulSoup(response.content, 'html5lib', from_encoding=response.encoding)
-        htm = response.text
+        if not headless:
+            if response.status_code == 404:
+                return await ctx.reply("> Provided link gives 404 error... Please check the link")
+            response.encoding = response.apparent_encoding
+            soup = BeautifulSoup(response.content, 'html5lib', from_encoding=response.encoding)
+            htm = response.text
+
+        else:
+            soup = BeautifulSoup(driver.page_source)
+            htm = driver.page_source
         sel = parsel.Selector(htm)
         sel_tag = False
+        if 'b.faloo' in firstchplink or 'wap.faloo' in firstchplink:
+            noofchapters = 150
         if secondchplink is None and nextselector is None:
             next_chp_find = True
             path = ""
@@ -967,7 +1037,7 @@ class Crawler(commands.Cog):
                 firstchplink = firstchplink.replace("/txt", "")
                 firstchplink = firstchplink.replace(".htm", "/")
                 response = requests.get(firstchplink, headers=headers, timeout=20)
-            firstchplink = parsel.Selector(response.text).css(
+            firstchplink = parsel.Selector(htm).css(
                 "#catalog > ul > li:nth-child(1) > a ::attr(href)").extract_first()
             response = requests.get(firstchplink, headers=headers, timeout=20)
             response.encoding = response.apparent_encoding
@@ -1023,6 +1093,8 @@ class Crawler(commands.Cog):
             title = await FileHandler.get_title(soup)
         if title is None or str(title).strip() == "":
             title = firstchplink
+        if (title is None or title == "") and headless:
+            title = driver.title
         chp_count = 1
         # print(title)
         if "69shu" in firstchplink:
@@ -1150,7 +1222,7 @@ class Crawler(commands.Cog):
                         return await ctx.send(" There is some problem with the detected selector")
                 try:
 
-                    output = await self.getcontent(current_link, css, path, self.bot, sel_tag, scraper, next_chp_find)
+                    output = await self.getcontent(current_link, css, path, self.bot, sel_tag, scraper, next_chp_find, driver)
                     chp_text = output[0]
                 except Exception as e:
                     if i <= 10:
