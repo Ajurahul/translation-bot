@@ -751,7 +751,7 @@ class Crawler(commands.Cog):
                 await ctx.reply(content=f"> Updating {str(library)} with name : {title_name}")
             if len(urls) < 1700:
                 book = await self.bot.loop.run_in_executor(
-                    None, self.direct, urls, novel, ctx.author.id, cloudscrape, len(asyncio.all_tasks(), headless)
+                    None, self.direct, urls, novel, ctx.author.id, cloudscrape, len(asyncio.all_tasks()), headless
                 )
                 if book is None:
                     return await ctx.reply("Crawling stopped")
