@@ -112,6 +112,7 @@ class Translate(commands.Cog):
         except:
             pass
         name = None
+
         if link is not None and link.startswith("#"):
             try:
                 novel_id = int(link.replace("#", ""))
@@ -248,7 +249,9 @@ class Translate(commands.Cog):
                 msg = ctx.message
             name = msg.attachments[0].filename.replace(".txt", "").replace(".docx", "").replace(".epub", "").replace(
                 ".pdf", "")
+            fullname = msg.attachments[0].filename or file.filename
             file_type = resp.headers["content-type"].split("/")[-1]
+            filetype2 = file.content_type or msg.attachments[0].content_type
         elif novel is None:
             try:
                 resp = await self.bot.con.get(link)
@@ -264,7 +267,7 @@ class Translate(commands.Cog):
                 )
             name = link.split("/")[-1].replace(".txt", "").replace(".docx", "").replace(".epub", "").replace(".pdf", "")
             name = name.replace("%20", " ")
-        if "plain" in file_type.lower() or "txt" in file_type.lower():
+        if "plain" in file_type.lower() or "txt" in file_type.lower() or "plain" in filetype2.lower() or "txt" in filetype2.lower() or "txt" in fullname:
             file_type = "txt"
         # elif "document" in file_type.lower() or "docx" in file_type.lower():
         #     file_type = "docx"
@@ -273,6 +276,7 @@ class Translate(commands.Cog):
         elif "pdf" in file_type.lower():
             file_type = "pdf"
         else:
+
             return await ctx.send("> **❌Only .txt , .pdf and .epub supported** Use txt for best results",
                                   ephemeral=True)
         if novelname is not None:
