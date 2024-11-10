@@ -202,7 +202,7 @@ class Translate(commands.Cog):
             file_type = name.split(".")[-1]
             path = await self.bot.loop.run_in_executor(None, self.bot.mega.download_url,
                                                        link, None, f"{ctx.author.id}.{file_type}")
-            if "txt" not in file_type and "epub" not in file_type and "pdf" not in file_type:
+            if "txt" not in file_type and "epub" not in file_type and "pdf" not in file_type and "txt" not in name:
                 os.remove(path)
                 await rep_msg.delete()
                 return await ctx.send("> **❌Only .txt, .pdf and .epub supported** use txt for best results",
