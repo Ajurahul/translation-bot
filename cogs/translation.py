@@ -107,6 +107,8 @@ class Translate(commands.Cog):
                     give true to ignore the library check
                """
         story = ""
+        filetype2 = "txt"
+        fullname = "txt"
         try:
             await ctx.defer()
         except:
