@@ -961,6 +961,9 @@ class Crawler(commands.Cog):
     async def cclear(self, ctx: commands.Context):
         if ctx.author.id in self.bot.crawler:
             del self.bot.crawler[ctx.author.id]
+
+        if ctx.author.id in self.bot.crawler_next:
+            del self.bot.crawler_next[ctx.author.id]
         files = os.listdir()
         for i in files:
             if str(ctx.author.id) in str(i) and "crawl" in i:
@@ -1412,6 +1415,8 @@ class Crawler(commands.Cog):
                     description = GoogleTranslator(source="auto", target="english").translate(
                         await FileHandler.get_desc_from_text(full_text[:5000], title=org_title, link=firstchplink)[
                               :500]).strip()
+
+                del self.bot.crawler_next[ctx.author.id]
             except:
                 pass
 
