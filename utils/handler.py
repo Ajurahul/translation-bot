@@ -436,6 +436,8 @@ class FileHandler:
         name = name.replace("Chapter", "")
         name = name.replace("chapter", "")
         spl = name.split("_")
+        if "ongoing" in name.lower() or "completed" in name.lower():
+            return True
         dictionary = PyDictionary()
         segment = 0
         if len(spl) == 1:
@@ -447,7 +449,7 @@ class FileHandler:
                 t = t[:-1]
             if t.lower() in bot.dictionary or (len(t) > 3
                                                and bool(dictionary.meaning(str(t), disable_errors=True))):
-                if len(t) > 3 or segment >= 2:
+                if len(t) > 5 or segment >= 2:
                     return True
                 else:
                     segment += 1
