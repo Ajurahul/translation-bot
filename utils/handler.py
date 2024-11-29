@@ -436,7 +436,7 @@ class FileHandler:
         name = name.replace("Chapter", "")
         name = name.replace("chapter", "")
         spl = name.split("_")
-        if "ongoing" in name.lower() or "complete" in name.lower():
+        if "ongoing" in name.lower() or "complete" in name.lower() or len(spl) > 4:
             return True
         dictionary = PyDictionary()
         segment = 0
