@@ -27,3 +27,4 @@ EbookLib
 pypdf~=3.17.0
 undetected-chromedriver>=3.5.4
 selenium==4.15.2
+pymongo==4.8.0
