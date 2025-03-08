@@ -43,11 +43,11 @@ async def on_ready():
     # bot.auto_restart.start()
 
 
-@bot.event
-async def on_command(ctx: commands.Context):
-    gc.collect()
-    bot.logger.info(
-        f"Command {ctx.command if ctx.command else 'Unknown Command'} called by {ctx.author} in {ctx.channel} with args {ctx.args} and kargs {ctx.kwargs}")
+# @bot.event
+# async def on_command(ctx: commands.Context):
+#     gc.collect()
+#     bot.logger.info(
+#         f"Command {ctx.command if ctx.command else 'Unknown Command'} called by {ctx.author} in {ctx.channel} with args {ctx.args} and kargs {ctx.kwargs}")
 
 
 async def main():

@@ -24,14 +24,14 @@ from utils.connector import Mongo
 
 class Raizel(commands.Bot):
     con: aiohttp.ClientSession
-    boot: datetime.datetime.utcnow()
+    boot: datetime.datetime
     allowed: list[str]
     mongo: Mongo
+    mega: Mega = None
 
     def __init__(self) -> None:
         self.log_path = None
         self.blocked = None
-        self.mega: Mega = None
         self.logger = None
         intents = discord.Intents.all()
         intents.members = True
@@ -109,6 +109,13 @@ class Raizel(commands.Bot):
                 await channel.send(f"deleting {x}")
                 print(f"deleting {x}")
                 os.remove(x)
+        await self.connect_mega_account(channel)
+        await self.load_title()
+        n = await self.add_roles()
+        if n > 0:
+            await channel.send(f"Added Storage access to {n} users")
+
+    async def connect_mega_account(self, channel):
         try:
             with open(os.getenv("MEGA"), 'rb') as f:
                 megastore = pickle.load(f)
@@ -127,10 +134,6 @@ class Raizel(commands.Bot):
                     allowed_mentions=discord.AllowedMentions(roles=False))
                 print("mega login anonymously failed ..something wrong with mega", )
             print(e)
-        await self.load_title()
-        n = await self.add_roles()
-        if n > 0:
-            await channel.send(f"Added Storage access to {n} users")
 
     async def add_roles(self) -> int:
         guild = await self.fetch_guild(940866934214373376)
@@ -147,17 +150,10 @@ class Raizel(commands.Bot):
         members = [member async for member in guild.fetch_members()]
         banned_members = await self.mongo.blocker.get_all_banned_users()
         for member in members:
-            if member.id in user_ids:
-                if role in member.roles:
-                    continue
-                if member.id in banned_members:
-                    continue
+            if member.id in user_ids and role not in member.roles and member.id not in banned_members:
                 no = no + 1
                 print(f"adding role to {member.name}")
                 await member.add_roles(role)
-            # else:
-            #     print(f"not adding access to  {member.name}")
-
         return no
 
     async def load_title(self):
@@ -168,22 +164,17 @@ class Raizel(commands.Bot):
             joblib.dump(titles, 'titles.sav')
             print("Loaded titles")
             del titles
-            return
         except Exception as e:
             print("error loading titles")
             print(e)
 
     def setup_logging(self):
-        # base_dir = os.path.dirname(os.path.abspath(__file__))
-        # self.log_path = os.path.join(base_dir, 'logs', 'bot.txt')
-        self.log_path = os.path.join("home", "ec2-user", 'applogs', 'bot.txt')
+        self.log_path = os.path.join("home", "ubuntu", 'applogs', 'bot.txt')
         os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
         formatter = logging.Formatter('%(asctime)s %(levelname)-8s %(message)s')
-        logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)-8s %(message)s',
-                            datefmt='%Y-%m-%d %H:%M:%S')
+        logging.basicConfig(level=logging.WARNING, format='%(asctime)s %(levelname)-8s %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
         _logger = logging.getLogger(__name__)
-        loghandler = RotatingFileHandler(encoding="utf-8", filename=self.log_path, maxBytes=20 * 1024 * 1024,
-                                         backupCount=2 )
+        loghandler = RotatingFileHandler(encoding="utf-8", filename=self.log_path, maxBytes=10 * 1024 * 1024, backupCount=2)
         loghandler.setFormatter(formatter)
         _logger.addHandler(loghandler)
         return _logger
@@ -197,11 +188,7 @@ class Raizel(commands.Bot):
             except:
                 pass
             print('error occurred on connecting to Discord client... will try after 60 secs')
-            print(os.getenv("TOKEN"))
-            print(e.with_traceback())
             print(e)
-            # time.sleep(60)
-            # return await self.start()
 
     @property
     def uptime(self) -> datetime.timedelta:
@@ -214,9 +201,7 @@ class Raizel(commands.Bot):
     @property
     def display_langs(self) -> str:
         string = ["{0: ^17}".format(f"{k} --> {v}") for k, v in self.languages.items()]
-        string = "\n".join(
-            ["".join(string[i: i + 3]) for i in range(0, len(string), 3)]
-        )
+        string = "\n".join(["".join(string[i: i + 3]) for i in range(0, len(string), 3)])
         return string
 
     @property
