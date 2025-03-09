@@ -169,7 +169,7 @@ class Raizel(commands.Bot):
             print(e)
 
     def setup_logging(self):
-        self.log_path = os.path.join("home", "ec2-user", 'bot.log')
+        self.log_path = os.path.join("home", "ec2-user", 'applogs', 'bot.txt')
         os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
         formatter = logging.Formatter('%(asctime)s %(levelname)-8s %(message)s')
         logging.basicConfig(level=logging.WARNING, format='%(asctime)s %(levelname)-8s %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
