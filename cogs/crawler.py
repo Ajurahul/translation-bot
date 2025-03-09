@@ -179,7 +179,8 @@ class Crawler(commands.Cog):
                     executor.shutdown(wait=False, cancel_futures=True)
                     return None
                     # executor.
-                self.bot.crawler[name] = f"{len(novel)}/{len(urls)}"
+                if len(novel) % 25 == 0:
+                    self.bot.crawler[name] = f"{len(novel)}/{len(urls)}"
             return novel
 
     async def getcontent(self, links: str, css: str, next_xpath, bot, tag, scraper, next_chp_finder: bool = False,

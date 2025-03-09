@@ -77,7 +77,8 @@ class Translator:
                         raise e
                     else:
                         pass
-                self.bot.translator[self.user] = f"{len(self.order)}/{len(chapters)}"
+                if len(self.order) % 25 == 0:
+                    self.bot.translator[self.user] = f"{len(self.order)}/{len(chapters)}"
 
     async def start(self, chapters: t.List[str], no_of_tasks: int = 8) -> str:
         await self.bot.loop.run_in_executor(None, self.translates, chapters, no_of_tasks)
