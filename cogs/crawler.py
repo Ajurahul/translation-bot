@@ -155,11 +155,11 @@ class Crawler(commands.Cog):
 
     def get_workers(self, tasks: int):
         if tasks < 8:
-            return 10
-        elif tasks <= 9:
-            return 9
-        else:
             return 8
+        elif tasks <= 9:
+            return 6
+        else:
+            return 5
 
     def direct(self, urls: t.List[str], novel: t.Dict[int, str], name: int, cloudscrape: bool, tasks: int = 8) -> dict:
         if cloudscrape:
