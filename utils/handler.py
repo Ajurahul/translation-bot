@@ -660,7 +660,7 @@ class FileHandler:
             description: str = "", thumbnail: str = "", library: int = None, novel_url: str = None
     ) -> None:
         download_url = None
-        discord_dnld_url= None
+        discord_dnld_url = None
         update: bool = True
         if library is None:
             next_no = await bot.mongo.library.next_number
@@ -702,12 +702,15 @@ class FileHandler:
                 channel = bot.get_channel(
                     1155398011229327400
                 ) or await bot.fetch_channel(1155398011229327400)
-            msg = await channel.send(
+            try:
+                msg = await channel.send(
                 embed=embed, file=discord.File(f"{ctx.author.id}.txt", f"{name}.txt"),
                 allowed_mentions=discord.AllowedMentions(users=False)
-            )
-            download_url = msg.attachments[0].url
-            discord_dnld_url = download_url
+                )
+                download_url = msg.attachments[0].url
+                discord_dnld_url = download_url
+            except:
+                pass
         if size > 0:
             try:
                 await ctx.send(
@@ -814,7 +817,7 @@ class FileHandler:
                                                   thumbnail=thumbnail, category=category, crawled_from=novel_url)
         if discord_dnld_url is None:
             link_dwnl = download_url
-        else :
+        else:
             link_dwnl = discord_dnld_url
         view = LinkView({"Novel": [link_dwnl, await self.get_emoji_book()]})
         await ctx.reply(content=f"> **{ctx.author.mention} 🎉Here is your translated novel #{next_no} {name}**",
@@ -866,13 +869,15 @@ class FileHandler:
             channel = bot.get_channel(
                 channel_id
             ) or await bot.fetch_channel(channel_id)
-
-            msg = await channel.send(
-                embed=embed,
-                file=discord.File(f"{ctx.author.id}_cr.txt", f"{title}.txt"),
-                allowed_mentions=discord.AllowedMentions(users=False)
-            )
-            download_url = msg.attachments[0].url
+            try:
+                msg = await channel.send(
+                    embed=embed,
+                    file=discord.File(f"{ctx.author.id}_cr.txt", f"{title}.txt"),
+                    allowed_mentions=discord.AllowedMentions(users=False)
+                )
+                download_url = msg.attachments[0].url
+            except:
+                pass
         if size > 0:
             bot.crawler_count = bot.crawler_count + 1
             # if size :
