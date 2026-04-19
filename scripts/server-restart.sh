@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-LOG_DIR="/home/logs"
+LOG_DIR="$HOME/logs"
 LOG_FILE="$LOG_DIR/translation-bot.log"
 
 mkdir -p "$LOG_DIR"
