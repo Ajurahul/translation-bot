@@ -1,4 +1,11 @@
+#!/usr/bin/env bash
+
+LOG_DIR="/home/logs"
+LOG_FILE="$LOG_DIR/translation-bot.log"
+
+mkdir -p "$LOG_DIR"
+
 nowtime=$(date)
-echo "$USER : Restarting server at $nowtime">>/home/ec2-user/logs
-aws ec2 reboot-instances --instance-ids i-00d5a946cd73a5150 --profile admin >>/home/ec2-user/logs
+echo "$USER : Restarting server at $nowtime" >> "$LOG_FILE"
+aws ec2 reboot-instances --instance-ids i-00d5a946cd73a5150 --profile admin >> "$LOG_FILE"
 sudo systemctl reboot
