@@ -646,6 +646,24 @@ class Admin(commands.Cog):
                 if ctx:
                     await ctx.send(f"❌ Auto-backup error: {e}")
 
+    @commands.has_role(1020638168237740042)
+    @commands.hybrid_command(help="Show the latest git commit hash and message for verification.")
+    async def gitcommit(self, ctx: commands.Context):
+        import subprocess
+        import os
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        repo_dir = os.path.abspath(os.path.join(script_dir, '..'))
+        try:
+            result = subprocess.run([
+                "git", "log", "-1", "--pretty=format:%h %s (%an, %ar)"
+            ], cwd=repo_dir, capture_output=True, text=True)
+            if result.returncode == 0:
+                await ctx.send(f"`{result.stdout.strip()}`")
+            else:
+                await ctx.send(f"❌ Could not get latest commit: {result.stderr}")
+        except Exception as e:
+            await ctx.send(f"❌ Error: {e}")
+
 
 async def setup(bot):
     await bot.add_cog(Admin(bot))
