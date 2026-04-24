@@ -520,6 +520,128 @@ class Admin(commands.Cog):
         else:
             return await ctx.send(f"```yaml\n{last_bytes[:1900]}\n```")
 
+    @commands.has_role(1020638168237740042)
+    @commands.hybrid_command(help="Run diagnostics and health checks on bot subsystems.")
+    async def diagnostics(self, ctx: commands.Context):
+        await ctx.defer()
+        results = []
+        # MongoDB check
+        try:
+            await self.bot.mongo.library.get_all_novels()
+            mongo_status = "✅ MongoDB: OK"
+        except Exception as e:
+            mongo_status = f"❌ MongoDB: {e}"
+        results.append(mongo_status)
+        # MEGA check
+        try:
+            if self.bot.mega and hasattr(self.bot.mega, 'user'):
+                mega_status = f"✅ MEGA: Logged in as {self.bot.mega.user}"
+            else:
+                mega_status = "❌ MEGA: Not logged in"
+        except Exception as e:
+            mega_status = f"❌ MEGA: {e}"
+        results.append(mega_status)
+        # Discord API check
+        try:
+            latency = round(self.bot.latency * 1000)
+            discord_status = f"✅ Discord API: Latency {latency}ms"
+        except Exception as e:
+            discord_status = f"❌ Discord API: {e}"
+        results.append(discord_status)
+        # File system check
+        try:
+            test_path = os.path.join(os.path.dirname(__file__), '../logs/diag_test.txt')
+            with open(test_path, 'w') as f:
+                f.write('test')
+            os.remove(test_path)
+            fs_status = "✅ File System: Write OK"
+        except Exception as e:
+            fs_status = f"❌ File System: {e}"
+        results.append(fs_status)
+        # Backup dir check
+        try:
+            backup_dir = os.path.join(os.path.dirname(__file__), '../backups')
+            os.makedirs(backup_dir, exist_ok=True)
+            test_file = os.path.join(backup_dir, 'diag_test.txt')
+            with open(test_file, 'w') as f:
+                f.write('test')
+            os.remove(test_file)
+            backup_status = "✅ Backups Dir: Write OK"
+        except Exception as e:
+            backup_status = f"❌ Backups Dir: {e}"
+        results.append(backup_status)
+        await ctx.send("\n".join(results))
+
+    @commands.has_role(1020638168237740042)
+    @commands.hybrid_command(help="Trigger a backup of the MongoDB database.")
+    async def backupdb(self, ctx: commands.Context):
+        await ctx.defer()
+        import subprocess
+        import datetime
+        backup_dir = os.path.join(os.path.dirname(__file__), '../backups')
+        os.makedirs(backup_dir, exist_ok=True)
+        timestamp = datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+        backup_file = os.path.abspath(os.path.join(backup_dir, f"mongo_backup_{timestamp}.archive"))
+        # Try to get Mongo URI from env or config
+        mongo_uri = os.getenv("MONGO_URI") or getattr(self.bot.mongo, 'uri', None)
+        if not mongo_uri:
+            return await ctx.send("> Could not determine MongoDB URI for backup.")
+        try:
+            result = subprocess.run([
+                "mongodump",
+                f"--uri={mongo_uri}",
+                f"--archive={backup_file}"
+            ], capture_output=True, text=True)
+            if result.returncode == 0:
+                await ctx.send(f"✅ Backup complete: `{backup_file}`")
+            else:
+                await ctx.send(f"❌ Backup failed: {result.stderr}")
+        except Exception as e:
+            await ctx.send(f"❌ Backup error: {e}")
+
+    # Auto-backup task (runs daily)
+    @commands.Cog.listener()
+    async def on_ready(self):
+        if not hasattr(self, '_auto_backup_started'):
+            self._auto_backup_started = True
+            self.bot.loop.create_task(self.auto_backup_task())
+
+    async def auto_backup_task(self):
+        import asyncio
+        import datetime
+        while True:
+            now = datetime.datetime.utcnow()
+            # Run at 03:00 UTC
+            next_run = now.replace(hour=3, minute=0, second=0, microsecond=0)
+            if next_run < now:
+                next_run += datetime.timedelta(days=1)
+            await asyncio.sleep((next_run - now).total_seconds())
+            ctx = None
+            try:
+                # Use backupdb logic, but without ctx
+                backup_dir = os.path.join(os.path.dirname(__file__), '../backups')
+                os.makedirs(backup_dir, exist_ok=True)
+                timestamp = datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+                backup_file = os.path.abspath(os.path.join(backup_dir, f"mongo_backup_{timestamp}.archive"))
+                mongo_uri = os.getenv("MONGO_URI") or getattr(self.bot.mongo, 'uri', None)
+                if mongo_uri:
+                    import subprocess
+                    result = subprocess.run([
+                        "mongodump",
+                        f"--uri={mongo_uri}",
+                        f"--archive={backup_file}"
+                    ], capture_output=True, text=True)
+                    # Optionally, prune old backups (keep last 7)
+                    backups = sorted([f for f in os.listdir(backup_dir) if f.startswith('mongo_backup_')], reverse=True)
+                    for old in backups[7:]:
+                        try:
+                            os.remove(os.path.join(backup_dir, old))
+                        except Exception:
+                            pass
+            except Exception as e:
+                if ctx:
+                    await ctx.send(f"❌ Auto-backup error: {e}")
+
 
 async def setup(bot):
     await bot.add_cog(Admin(bot))
