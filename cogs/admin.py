@@ -279,13 +279,17 @@ class Admin(commands.Cog):
             gc.collect()
         except:
             pass
+        # Determine the correct path to git_update.sh
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        repo_dir = os.path.abspath(os.path.join(script_dir, '..'))
+        git_update_script = os.path.join(repo_dir, 'scripts', 'git_update.sh')
         if git_update or self.bot.update:
             try:
-                subprocess.call(['sh', '/home/ec2-user/translation-bot/scripts/git_update.sh'])
+                subprocess.call(['sh', git_update_script])
                 await ctx.reply(content="> ** source code updated**")
             except Exception as e:
                 await channel.send("git update failed")
-                await channel.send(e.with_traceback().__str__()[:1900])
+                await channel.send(str(e)[:1900])
         if random.randint(0, 15) < 12 or server is True:
             try:
                 await channel.send("Server restarted")
