@@ -169,11 +169,12 @@ class Raizel(commands.Bot):
             print(e)
 
     def setup_logging(self):
-        self.log_path = os.path.join("home", "ec2-user", 'applogs', 'bot.txt')
+        self.log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'logs', 'bot.txt')
+        self.log_path = os.path.normpath(self.log_path)
         os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
-        formatter = logging.Formatter('%(asctime)s %(levelname)-8s %(message)s')
-        logging.basicConfig(level=logging.WARNING, format='%(asctime)s %(levelname)-8s %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+        formatter = logging.Formatter('%(asctime)s %(levelname)-8s %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
         _logger = logging.getLogger(__name__)
+        _logger.setLevel(logging.INFO)
         loghandler = RotatingFileHandler(encoding="utf-8", filename=self.log_path, maxBytes=10 * 1024 * 1024, backupCount=2)
         loghandler.setFormatter(formatter)
         _logger.addHandler(loghandler)

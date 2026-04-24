@@ -477,16 +477,23 @@ class Admin(commands.Cog):
     @commands.has_role(1020638168237740042)
     @commands.hybrid_command(help="ban user.. Admin only command")
     async def getlog(self, ctx: commands.Context, file: bool = False, no: int = 1500):
-        async with aiofiles.open(f"{self.bot.log_path}", "r", encoding="utf-8") as f:
+        if not self.bot.log_path or not os.path.exists(self.bot.log_path):
+            return await ctx.send("> Log file not found or logging not initialized.")
+        # Flush all handlers so the file is up-to-date
+        for handler in self.bot.logger.handlers:
+            handler.flush()
+        async with aiofiles.open(self.bot.log_path, "r", encoding="utf-8") as f:
             full = await f.read()
-            last_bytes = full[len(full) - no:]
+        if not full.strip():
+            return await ctx.send("> Log file is empty.")
+        last_bytes = full[-no:]
         if file:
             return await ctx.send(
-                embed=discord.Embed(title=f"logs", description=last_bytes, colour=discord.Colour.random()),
-                file=discord.File(f"{self.bot.log_path}", "discord_botLog.txt"),
+                embed=discord.Embed(title="logs", description=last_bytes[:4000], colour=discord.Colour.random()),
+                file=discord.File(self.bot.log_path, "discord_botLog.txt"),
             )
         else:
-            return await ctx.send(f"```yaml\n{last_bytes}\n```")
+            return await ctx.send(f"```yaml\n{last_bytes[:1900]}\n```")
 
 
 async def setup(bot):
