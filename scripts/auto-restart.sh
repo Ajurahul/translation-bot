@@ -2,8 +2,8 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-LOG_DIR="$HOME/logs"
-LOG_FILE="$LOG_DIR/translation-bot.log"
+LOG_DIR="$REPO_DIR/logs"
+LOG_FILE="$LOG_DIR/bot.txt"
 
 mkdir -p "$LOG_DIR"
 

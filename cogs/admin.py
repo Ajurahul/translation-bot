@@ -477,21 +477,46 @@ class Admin(commands.Cog):
     @commands.has_role(1020638168237740042)
     @commands.hybrid_command(help="ban user.. Admin only command")
     async def getlog(self, ctx: commands.Context, file: bool = False, no: int = 1500):
-        if not self.bot.log_path or not os.path.exists(self.bot.log_path):
-            return await ctx.send("> Log file not found or logging not initialized.")
+        log_path = self.bot.log_path
+        if not log_path:
+            return await ctx.send("> Log file path not set or logging not initialized.")
+        # Ensure log file exists
+        if not os.path.exists(log_path):
+            try:
+                with open(log_path, "w", encoding="utf-8") as f:
+                    f.write("")
+            except Exception as e:
+                return await ctx.send(f"> Could not create log file: {e}")
         # Flush all handlers so the file is up-to-date
-        for handler in self.bot.logger.handlers:
-            handler.flush()
-        async with aiofiles.open(self.bot.log_path, "r", encoding="utf-8") as f:
-            full = await f.read()
+        for handler in getattr(self.bot.logger, 'handlers', []):
+            try:
+                handler.flush()
+            except Exception:
+                pass
+        try:
+            import aiofiles.os
+            stat = await aiofiles.os.stat(log_path)
+            file_size = stat.st_size
+            # Read only last N bytes if file is large
+            read_bytes = min(no, file_size)
+            async with aiofiles.open(log_path, "r", encoding="utf-8") as f:
+                if file_size > no:
+                    await f.seek(file_size - no)
+                full = await f.read()
+        except Exception as e:
+            return await ctx.send(f"> Error reading log file: {e}")
         if not full.strip():
             return await ctx.send("> Log file is empty.")
+        # Truncate for Discord limits
         last_bytes = full[-no:]
         if file:
-            return await ctx.send(
-                embed=discord.Embed(title="logs", description=last_bytes[:4000], colour=discord.Colour.random()),
-                file=discord.File(self.bot.log_path, "discord_botLog.txt"),
-            )
+            try:
+                return await ctx.send(
+                    embed=discord.Embed(title="logs", description=last_bytes[:4000], colour=discord.Colour.random()),
+                    file=discord.File(log_path, "discord_botLog.txt"),
+                )
+            except Exception as e:
+                return await ctx.send(f"> Error sending log file: {e}")
         else:
             return await ctx.send(f"```yaml\n{last_bytes[:1900]}\n```")
 
