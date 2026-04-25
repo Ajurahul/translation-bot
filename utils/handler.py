@@ -718,8 +718,6 @@ class FileHandler:
                     delete_after=5,
                 )
                 embed.add_field(name="size", value=f"{round(size / (1024 ** 2), 2)} MB")
-                # filename = f"{random.choice(string.ascii_letters)}{random.choice(string.digits)}{str(
-                # ctx.author.id)}_" \ f"trans{random.choice(string.ascii_letters)}{random.randint(100,1000)}.txt"
                 file = await bot.loop.run_in_executor(None, bot.mega.upload, f"{ctx.author.id}.txt", None,
                                                       f"{name[:100]}.txt")
                 filelnk = await bot.loop.run_in_executor(None, bot.mega.get_upload_link, file)
@@ -744,10 +742,16 @@ class FileHandler:
             except Exception as e:
                 print(e)
                 bot.logger.info(f"Error occurred {e} {e.__traceback__}")
-                await ctx.reply(
-                    "**Sorry your file was too big and mega seems down now. ping developers in support server to resolve the issue.. please split it and try again.**" + e[
-                                                                                                                                                                         :1000] + ""
-                )
+                # Fallback to Discord-uploaded URL if available
+                if discord_dnld_url:
+                    download_url = discord_dnld_url
+                    await ctx.reply(
+                        "**Mega upload failed, but your file is available via Discord.**"
+                    )
+                else:
+                    await ctx.reply(
+                        "**Sorry your file was too big and mega seems down now. Ping developers in support server to resolve the issue.. please split it and try again.**" + str(e)[:1000]
+                    )
             try:
                 os.remove(f"{ctx.author.id}.txt")
             except:
@@ -880,13 +884,7 @@ class FileHandler:
                 pass
         if size > 0:
             bot.crawler_count = bot.crawler_count + 1
-            # if size :
-            #     os.remove(f"{ctx.author.id}_cr.txt")
-            #     bot.crawler_count = bot.crawler_count + 1
-            #     return await ctx.send('Crawled file is too big. there is some problem in crawler')
             try:
-                # filename = f"{random.choice(string.ascii_letters)}{random.choice(string.digits)}{str(ctx.author.id)}_" \
-                #            f"trans{random.choice(string.ascii_letters)}{random.randint(100, 1000)}.txt"
                 file = await bot.loop.run_in_executor(None, bot.mega.upload, f"{ctx.author.id}_cr.txt", None,
                                                       f"{title_name[:100]}.txt")
                 await ctx.send(
@@ -912,9 +910,15 @@ class FileHandler:
             except Exception as e:
                 bot.logger.info(f"Error occurred {e} {e.__traceback__}")
                 print(e)
-                await ctx.reply(
-                    "> **❌Sorry the file is too big to send and mega seems down now. ping developers in support server to resolve the issue..**" + e[
-                                                                                                                                                   :1000] + "")
+                # Instead of failing, fallback to Discord-uploaded URL if available
+                if download_url:
+                    await ctx.reply(
+                        "> **❌Mega upload failed, but your file is available via Discord.**"
+                    )
+                else:
+                    await ctx.reply(
+                        "> **❌Sorry the file is too big to send and mega seems down now. Ping developers in support server to resolve the issue..**" + str(e)[:1000]
+                    )
             try:
                 os.remove(f"{ctx.author.id}_cr.txt")
             except:
