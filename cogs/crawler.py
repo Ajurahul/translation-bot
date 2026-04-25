@@ -88,20 +88,22 @@ class Crawler(commands.Cog):
     @staticmethod
     def easy(nums: int, links: str, css: str, chptitleCSS: str, scraper) -> t.Tuple[int, str]:
         response = None
-        retry_attempts = 2
-        for _ in range(retry_attempts):
+        retry_attempts = 3
+        delay = 3
+        for attempt in range(retry_attempts):
             try:
                 if scraper is not None:
                     response = scraper.get(links, headers=FileHandler.get_handler(), timeout=20)
                 else:
                     response = requests.get(links, headers=FileHandler.get_handler(), timeout=20)
+                if response is not None:
+                    break
             except Exception as e:
-                print(e)
-                # bot.logger.info(f"Error Occurred {e} {e.__traceback__}")
-                time.sleep(10)
-            else:
-                break
+                print(f"[easy] Network error on attempt {attempt+1} for {links}: {e}")
+                time.sleep(delay)
+                delay = min(delay * 2, 10)
         else:
+            print(f"[easy] All retry attempts failed for {links}")
             return nums, f"\ncouldn't get connection to {links}\n"
         if str(response.status_code).startswith('4'):
             print("Response received as error status code 404")
@@ -185,6 +187,9 @@ class Crawler(commands.Cog):
 
     async def getcontent(self, links: str, css: str, next_xpath, bot, tag, scraper, next_chp_finder: bool = False,
                          driver=None):
+        # Robust assignment and logging for soup/response
+        soup = None
+        response = None
         for _i in range(1, 5):
             try:
                 if driver is not None:
@@ -193,11 +198,11 @@ class Crawler(commands.Cog):
                         WebDriverWait(driver, 10).until(
                             lambda d: d.execute_script('return document.readyState') == 'complete'
                         )
-                    except:
+                    except Exception as e:
                         try:
                             driver.quit()
                             await asyncio.sleep(2)
-                        except:
+                        except Exception as e2:
                             await asyncio.sleep(5)
                             pass
                         driver = get_driver()
@@ -207,27 +212,73 @@ class Crawler(commands.Cog):
                         )
                     soup = BeautifulSoup(driver.page_source, "html.parser")
                 elif scraper is not None:
-                    response = await self.bot.loop.run_in_executor(None, self.scrape, scraper, links)
-                    response.encoding = response.apparent_encoding
-                    soup = BeautifulSoup(response.text, "html.parser", from_encoding=response.encoding)
-                    if str(response.status_code).startswith('4'):
+                    # Retry logic for scraper.get
+                    retry_attempts = 3
+                    delay = 2
+                    for attempt in range(retry_attempts):
+                        try:
+                            response = await self.bot.loop.run_in_executor(None, self.scrape, scraper, links)
+                            if response is not None:
+                                break
+                        except Exception as e:
+                            if hasattr(self.bot, 'logger'):
+                                self.bot.logger.info(f"[getcontent] scraper.get error on attempt {attempt+1} for {links}: {e}")
+                            await asyncio.sleep(delay)
+                            delay = min(delay * 2, 10)
+                    if response is not None:
+                        response.encoding = response.apparent_encoding
+                        soup = BeautifulSoup(response.text, "html.parser", from_encoding=response.encoding)
+                        if str(response.status_code).startswith('4'):
+                            if _i >= 4:
+                                if hasattr(self.bot, 'logger'):
+                                    self.bot.logger.info(f"[getcontent] 4xx error for {links}")
+                                return ['error', links]
+                            else:
+                                await asyncio.sleep(2)
+                                continue
+                    else:
+                        if hasattr(self.bot, 'logger'):
+                            self.bot.logger.info(f"[getcontent] response is None for {links}")
                         if _i >= 4:
                             return ['error', links]
                         else:
                             await asyncio.sleep(2)
                             continue
-                    # await asyncio.sleep(0.1)
                 else:
-                    response = await bot.con.get(links, headers=FileHandler.get_handler())
-                    soup = BeautifulSoup(await response.read(), "html.parser", from_encoding=response.get_encoding())
-                    if response.status == 404:
+                    # Retry logic for bot.con.get
+                    retry_attempts = 3
+                    delay = 2
+                    for attempt in range(retry_attempts):
+                        try:
+                            response = await bot.con.get(links, headers=FileHandler.get_handler())
+                            if response is not None:
+                                break
+                        except Exception as e:
+                            if hasattr(self.bot, 'logger'):
+                                self.bot.logger.info(f"[getcontent] bot.con.get error on attempt {attempt+1} for {links}: {e}")
+                            await asyncio.sleep(delay)
+                            delay = min(delay * 2, 10)
+                    if response is not None:
+                        soup = BeautifulSoup(await response.read(), "html.parser", from_encoding=response.get_encoding())
+                        if response.status == 404:
+                            if _i >= 4:
+                                await asyncio.sleep(2)
+                                if hasattr(self.bot, 'logger'):
+                                    self.bot.logger.info(f"[getcontent] 404 error for {links}")
+                                return ['error', links]
+                            else:
+                                continue
+                    else:
+                        if hasattr(self.bot, 'logger'):
+                            self.bot.logger.info(f"[getcontent] response is None for {links}")
                         if _i >= 4:
-                            await asyncio.sleep(2)
+                            await asyncio.sleep(3)
                             return ['error', links]
                         else:
                             continue
-                # response = requests.get(links, headers=headers, timeout=10)
-            except:
+            except Exception as e:
+                if hasattr(self.bot, 'logger'):
+                    self.bot.logger.info(f"[getcontent] Exception: {e}")
                 if _i >= 4:
                     await asyncio.sleep(3)
                     return ['error', links]
@@ -236,6 +287,10 @@ class Crawler(commands.Cog):
 
         # response.encoding = response.apparent_encoding
         # chp_html = response.text
+        if soup is None:
+            if hasattr(self.bot, 'logger'):
+                self.bot.logger.info(f"[getcontent] soup is None for {links}")
+            return ['error', links]
         sel = parsel.Selector(str(soup))
         article = await self.bot.loop.run_in_executor(None, simple_json_from_html_string, str(soup))
         chpTitle = article['title']
@@ -482,16 +537,21 @@ class Crawler(commands.Cog):
             reverse = "true"
         if "www.xklxsw.com/" in link:
             link = link.replace("www", "m")
+        res = None
         try:
             res = await self.bot.con.get(link)
         except Exception as e:
             print(e)
-            self.bot.logger.info(f"Error Occurred {e} {e.__traceback__}")
+            if hasattr(self.bot, 'logger'):
+                self.bot.logger.info(f"Error Occurred {e} {e.__traceback__}")
             await msg.delete()
             return await ctx.send("We couldn't connect to the provided link. Please check the link")
         novel = {}
-        if int(str(res.status)[0]) == 4:
+        if res is not None and int(str(res.status)[0]) == 4:
             cloudscrape = True
+        elif res is None:
+            if hasattr(self.bot, 'logger'):
+                self.bot.logger.info(f"[crawl] res is None for {link}")
         if cloudscrape:
             scraper = cloudscraper.CloudScraper(delay=10)  # CloudScraper inherits from requests.Session
             response = scraper.get(link, timeout=10)
@@ -626,33 +686,40 @@ class Crawler(commands.Cog):
         if (urls == [] or len(urls) < 30) and cloudscrape is False:
             if link[-1] == '/':
                 link = link[:-1]
+            response = None
             try:
                 response = requests.get(link, headers=headers, timeout=20)
-            except:
+            except Exception as e:
                 print('error')
-            response.encoding = response.apparent_encoding
-            html = response.text
-            sel = parsel.Selector(html)
-            urls = [
-                f"{j}"
-                for j in sel.css('a ::attr(href)').extract()
-                if name in j and "txt" not in j
-            ]
-            host = urlparse(link).netloc
-            if urls == [] or len(urls) < 30:
+                if hasattr(self.bot, 'logger'):
+                    self.bot.logger.info(f"[crawl] Exception in requests.get: {e}")
+            if response is not None:
+                response.encoding = response.apparent_encoding
+                html = response.text
+                sel = parsel.Selector(html)
                 urls = [
                     f"{j}"
                     for j in sel.css('a ::attr(href)').extract()
-                    if "txt" not in j
+                    if name in j and "txt" not in j
                 ]
+                host = urlparse(link).netloc
+                if urls == [] or len(urls) < 30:
+                    urls = [
+                        f"{j}"
+                        for j in sel.css('a ::attr(href)').extract()
+                        if "txt" not in j
+                    ]
 
-            utemp = []
-            for url in urls:
-                utemp.append(urljoin(link, url))
-            urls = [u for u in utemp if host in u]
-            # print(urls)
-            title_name = sel.css(maintitleCSS + " ::text").extract_first()
-            # print(urls)
+                utemp = []
+                for url in urls:
+                    utemp.append(urljoin(link, url))
+                urls = [u for u in utemp if host in u]
+                # print(urls)
+                title_name = sel.css(maintitleCSS + " ::text").extract_first()
+                # print(urls)
+            else:
+                if hasattr(self.bot, 'logger'):
+                    self.bot.logger.info(f"[crawl] response is None for {link}")
         scraper = cloudscraper.CloudScraper(delay=10)
         if urls == [] or len(urls) < 30:
             response = scraper.get(link)
@@ -890,6 +957,10 @@ class Crawler(commands.Cog):
             except:
                 pass
             async with aiofiles.open(f"{ctx.author.id}_cr.txt", "w", encoding="utf-8", errors="ignore") as f:
+                if 'text' not in locals() or text is None:
+                    if hasattr(self.bot, 'logger'):
+                        self.bot.logger.info(f"[crawl] text is None before writing to file for {ctx.author.id}")
+                    text = ''
                 await f.write(text)
             if description is None or description.strip() == "":
                 description = GoogleTranslator(source="auto", target="english").translate(
@@ -935,6 +1006,11 @@ class Crawler(commands.Cog):
                         asyncio.create_task(self.bot.get_command("restart").callback(Admin(self.bot), context_new2))
                 except:
                     pass
+        # Robust assignment and logging for download_url
+        if 'download_url' not in locals() or download_url is None:
+            if hasattr(self.bot, 'logger'):
+                self.bot.logger.info(f"[crawl] download_url is None for {ctx.author.id}")
+            download_url = ''
         if (
                 translate_to is not None or add_terms is not None) and download_url is not None and not download_url.strip() == "":
             if translate_to is None:
@@ -1263,11 +1339,15 @@ class Crawler(commands.Cog):
         try:
             description = GoogleTranslator().translate(await FileHandler.get_description(
                 soup=soup, link=firstchplink, next="true", title=org_title)).strip()
-        except:
+        except Exception as e:
+            if hasattr(self.bot, 'logger'):
+                self.bot.logger.info(f"[crawlnext] Error getting description: {e}")
             try:
                 description = GoogleTranslator().translate(await FileHandler.get_description(
                     soup=soup, link=firstchplink, title=org_title)).strip()
-            except:
+            except Exception as e2:
+                if hasattr(self.bot, 'logger'):
+                    self.bot.logger.info(f"[crawlnext] Error fallback description: {e2}")
                 description = await FileHandler.get_description(soup=soup, title=org_title)
         try:
             thumbnail = await FileHandler().get_og_image(soup=soup, link=firstchplink)
