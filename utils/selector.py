@@ -270,6 +270,7 @@ class CssSelector:
             # "m.bqg789.net": ["#nextpage", "#novelbody > div.head > div.nav_name > h1"],
             "requiemtls.com": ["div.bixbox.episodedl > div > div.navimedia > div.left > div > div:nth-child(3) > a", "div.ts-breadcrumb.bixbox > div > span:nth-child(2) > a > span"],
             "m.shuhaige" : ["None", "#chapter > div.path > a:nth-child(3)"],
+            "www.alicesw.com": ["None", "title"],
             # "requimtl.com": ["",]
         }
         for domain, ret_array in domain_mappings.items():
