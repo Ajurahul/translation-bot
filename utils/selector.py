@@ -126,8 +126,9 @@ class CssSelector:
                 "requimtl.com": "#content ::text",
                 "m.shuhaige": "#chapter > div.content ::text",
                 "www.fantinovels.com": "#htmlContent ::text",
-                "zeustranslations.blogspot.com": "#readingBox ::text"
-            }
+            "zeustranslations.blogspot.com": "#readingBox ::text",
+            "www.alicesw.com": "* ::text"
+        }
             for domain, css_selector in domain_mappings.items():
                 if domain in link:
                     return css_selector
@@ -188,7 +189,8 @@ class CssSelector:
             "www.tingxs.net": ["h1", "body > div.wp.mt10.ov > div.info_dv1.ov > h2 > font > font ::text"],
             "m.38xs.com": ["#read > div.main > div.detail > p.name > strong > font > font", "#chapter > h1 > font > font ::text"],
             "requiemtls.com": ["div.infox > h1","div.epheader ::text"],
-            "requimtl.com": ["head > title","h2 ::text"]  #body > div.min-h-screen.w-full.bg-gray-100.pb-12.text-\[\#444\].dark\:bg-\[\#2f303e\].dark\:text-\[\#9CA9BA\] > main > div.mx-auto.max-w-6xl.p-2.md\:px-8.md\:py-4 > div > div.flex.w-full.flex-col.gap-2 > div.relative.text-\[\#111\].dark\:text-white.md\:text-white > h1
+            "requimtl.com": ["head > title","h2 ::text"],  #body > div.min-h-screen...
+            "www.alicesw.com": ["title", "title ::text"]
         }
         for domain, ret_array in domain_mappings.items():
             if domain in link:
