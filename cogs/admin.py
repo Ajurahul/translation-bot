@@ -285,11 +285,22 @@ class Admin(commands.Cog):
         git_update_script = os.path.join(repo_dir, 'scripts', 'git_update.sh')
         if git_update or self.bot.update:
             try:
-                subprocess.call(['sh', git_update_script])
-                await ctx.reply(content="> ** source code updated**")
+                result = await self.bot.loop.run_in_executor(
+                    None, lambda: subprocess.run(['sh', git_update_script], capture_output=True, text=True, timeout=60)
+                )
+                if result.returncode == 0:
+                    self.bot.logger.info(f"[git_update] success: {result.stdout.strip()}")
+                    try:
+                        await ctx.reply(content=f"> ✅ Source code updated\n```{result.stdout.strip()[:1500]}```")
+                    except Exception:
+                        pass
+                else:
+                    self.bot.logger.info(f"[git_update] failed: {result.stderr.strip()}")
+                    await channel.send(f"git update failed (exit {result.returncode})")
+                    await channel.send(f"```{result.stderr.strip()[:1800]}```")
             except Exception as e:
-                await channel.send("git update failed")
-                await channel.send(str(e)[:1900])
+                self.bot.logger.info(f"[git_update] exception: {e}")
+                await channel.send(f"git update failed: {str(e)[:1900]}")
         if random.randint(0, 15) < 12 or server is True:
             try:
                 await channel.send("Server restarted")
