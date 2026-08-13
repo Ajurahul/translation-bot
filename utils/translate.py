@@ -14,43 +14,75 @@ class Translator:
         self.language = language
         self.order = {}
 
-    def translate(self, chapter: t.List[str], num: int) -> t.Tuple[int, t.List[str]]:
-        translated = []
-        try:
+    @staticmethod
+    def _is_error_500_response(translated: t.List[str]) -> bool:
+        if not translated:
+            return False
+        markers = (
+            "error 500",
+            "server error",
+            "that's an error",
+            "there was an error",
+            "please try again later",
+        )
+        for part in translated:
+            text = str(part).lower()
+            if "error 500" in text and any(m in text for m in markers[1:]):
+                return True
+        return False
+
+    def _translate_batch_with_retry(self, chapter: t.List[str]) -> t.List[str]:
+        retry_delays = [2, 4, 7, 10]
+        max_attempts = len(retry_delays) + 1
+        last_error = None
+
+        for attempt in range(max_attempts):
             try:
                 translated = GoogleTranslator(
                     source="auto", target=self.language
                 ).translate_batch(chapter)
-            except:
-                time.sleep(3)
-                translated = GoogleTranslator(
-                    source="auto", target=self.language
-                ).translate_batch(chapter)
+                if self._is_error_500_response(translated):
+                    raise RuntimeError("translation returned Error 500 response body")
+                return translated
+            except Exception as e:
+                last_error = e
+                if attempt >= max_attempts - 1:
+                    break
+                time.sleep(retry_delays[attempt])
+
+        raise last_error
+
+    def translate(self, chapter: t.List[str], num: int) -> t.Tuple[int, t.List[str]]:
+        translated = []
+        try:
+            translated = self._translate_batch_with_retry(chapter)
         except Exception as e:
             try:
                 if "text must be a valid text" in str(e):
                     for c in chapter:
                         if not isinstance(c, str) or c.isdigit():
                             chapter.remove(c)
-                    translated = GoogleTranslator(source="auto", target=self.language).translate_batch(chapter)
+                    translated = self._translate_batch_with_retry(chapter)
                 else:
                     time.sleep(5)
                     while True:
                         chp1 = chapter[:len(chapter) // 2]
                         chp2 = chapter[len(chapter) // 2:]
                         try:
-                            translated = GoogleTranslator(source="auto", target=self.language).translate_batch(chp1)
+                            translated = self._translate_batch_with_retry(chp1)
                         except:
                             translated = chp1
                             translated.insert(0, "\n\n--->couldn't translate this part")
                             chapter = chp1
+                        new_tr = []
                         try:
-                            new_tr = GoogleTranslator(source="auto", target=self.language).translate_batch(chp2)
+                            new_tr = self._translate_batch_with_retry(chp2)
                         except:
                             chp2.insert(0, "\n\n--->couldn't translate this part")
                             chapter = chp2
                         for tr in new_tr:
                             translated.append(tr)
+                        break
             except:
                 for tr in chapter:
                     translated.append("\n\n--->couldn't translate this part")
