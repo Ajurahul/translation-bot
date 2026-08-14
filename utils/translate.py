@@ -46,6 +46,7 @@ class Translator:
                     source="auto", target=self.language
                 ).translate_batch(chapter)
                 if self._is_error_500_response(translated):
+                    time.sleep(2)
                     raise RuntimeError("translation returned Error 500 response body")
                 return translated
             except Exception as e:
