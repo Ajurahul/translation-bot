@@ -22,4 +22,8 @@ then
   echo "$USER : started bot at $nowtime" >> "$LOG_FILE"
 #else
 # echo "already running"
+
+cd /home/ubuntu/translation-bot
+git pull
+git -C "$REPO_DIR" pull --ff-only
 fi
