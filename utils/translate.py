@@ -1,6 +1,7 @@
 import concurrent.futures
 import time
 import typing as t
+from idlelib.pyparse import trans
 
 from deep_translator import GoogleTranslator
 
@@ -18,6 +19,10 @@ class Translator:
     def _is_error_500_response(translated: t.List[str]) -> bool:
         if not translated:
             return False
+
+        joined = " ".join(str(part) for part in translated).lower()
+        joined = joined.replace("’", "'")
+
         markers = (
             "error 500",
             "server error",
@@ -25,16 +30,15 @@ class Translator:
             "there was an error",
             "please try again later",
         )
-        for part in translated:
-            text = str(part).lower()
-            if "error 500" in text and any(m in text for m in markers[1:]):
-                return True
-        return False
 
+        marker_hits = sum(marker in joined for marker in markers)
+        return "error 500" in joined and marker_hits >= 2
     def _translate_batch_with_retry(self, chapter: t.List[str]) -> t.List[str]:
         retry_delays = [2, 4, 7, 10]
         max_attempts = len(retry_delays) + 1
         last_error = None
+        translated = None
+
 
         for attempt in range(max_attempts):
             try:
@@ -50,7 +54,7 @@ class Translator:
                     break
                 time.sleep(retry_delays[attempt])
 
-        raise last_error
+        return translated
 
     def translate(self, chapter: t.List[str], num: int) -> t.Tuple[int, t.List[str]]:
         translated = []
