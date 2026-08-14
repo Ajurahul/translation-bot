@@ -54,7 +54,7 @@ class Translator:
                     break
                 time.sleep(retry_delays[attempt])
 
-        return translated
+        raise last_error
 
     def translate(self, chapter: t.List[str], num: int) -> t.Tuple[int, t.List[str]]:
         translated = []
