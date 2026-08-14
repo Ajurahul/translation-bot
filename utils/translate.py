@@ -35,7 +35,7 @@ class Translator:
         return "error 500" in joined and marker_hits >= 2
     def _translate_batch_with_retry(self, chapter: t.List[str]) -> t.List[str]:
         retry_delays = [2, 4, 7, 10]
-        max_attempts = len(retry_delays) + 1
+        max_attempts = len(retry_delays) + 10
         last_error = None
         translated = None
 
