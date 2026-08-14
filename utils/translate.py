@@ -1,7 +1,6 @@
 import concurrent.futures
 import time
 import typing as t
-from idlelib.pyparse import trans
 
 from deep_translator import GoogleTranslator
 
@@ -33,29 +32,59 @@ class Translator:
 
         marker_hits = sum(marker in joined for marker in markers)
         return "error 500" in joined and marker_hits >= 2
-    def _translate_batch_with_retry(self, chapter: t.List[str]) -> t.List[str]:
-        retry_delays = [2, 4, 7, 10]
-        max_attempts = len(retry_delays) + 10
-        last_error = None
-        translated = None
 
+    @staticmethod
+    def translate_with_retry(
+            text: str,
+            target: str = "english",
+            source: str = "auto",
+            retry_delays: t.Optional[t.List[int]] = None,
+    ) -> str:
+        delays = retry_delays or [2, 4, 7, 10]
+        last_error: t.Optional[Exception] = None
 
-        for attempt in range(max_attempts):
+        for attempt in range(len(delays) + 1):
             try:
-                translated = GoogleTranslator(
-                    source="auto", target=self.language
-                ).translate_batch(chapter)
-                if self._is_error_500_response(translated):
-                    time.sleep(2)
+                translated = GoogleTranslator(source=source, target=target).translate(text)
+                if Translator._is_error_500_response([str(translated)]):
                     raise RuntimeError("translation returned Error 500 response body")
                 return translated
             except Exception as e:
                 last_error = e
-                if attempt >= max_attempts - 1:
-                    break
-                time.sleep(retry_delays[attempt])
+                if attempt < len(delays):
+                    time.sleep(delays[attempt])
 
-        raise last_error
+        raise last_error or RuntimeError("translation failed after retries")
+
+    @staticmethod
+    def translate_batch_with_retry(
+            chapter: t.List[str],
+            target: str,
+            source: str = "auto",
+            retry_delays: t.Optional[t.List[int]] = None,
+    ) -> t.List[str]:
+        delays = retry_delays or [2, 4, 7, 10]
+        last_error: t.Optional[Exception] = None
+
+        for attempt in range(len(delays) + 1):
+            try:
+                translated = GoogleTranslator(source=source, target=target).translate_batch(chapter)
+                if Translator._is_error_500_response(translated):
+                    raise RuntimeError("translation returned Error 500 response body")
+                return translated
+            except Exception as e:
+                last_error = e
+                if attempt < len(delays):
+                    time.sleep(delays[attempt])
+
+        raise last_error or RuntimeError("translation failed after retries")
+
+    def _translate_batch_with_retry(self, chapter: t.List[str]) -> t.List[str]:
+        return self.translate_batch_with_retry(
+            chapter=chapter,
+            source="auto",
+            target=self.language,
+        )
 
     def translate(self, chapter: t.List[str], num: int) -> t.Tuple[int, t.List[str]]:
         translated = []

@@ -23,7 +23,6 @@ import requests
 from selenium import webdriver
 
 from bs4 import BeautifulSoup
-from deep_translator import GoogleTranslator
 from discord import app_commands
 from discord.ext import commands
 from readabilipy import simple_json_from_html_string
@@ -37,6 +36,7 @@ from utils.handler import FileHandler
 from utils.hints import Hints
 from utils.progress import Progress
 from utils.selector import CssSelector
+from utils.translate import Translator
 
 headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36"
@@ -790,8 +790,11 @@ class Crawler(commands.Cog):
                 f"> ❌Provided link only got **{str(len(urls))}** links in the page.Check if you have provided correct Table of contents url. If there is no TOC page try using /crawlnext with first chapter and required urls"
             )
         try:
-            description = GoogleTranslator(source="auto", target="english").translate(
-                (await FileHandler.get_description(soup, link, title=title_name))).strip()
+            description = Translator.translate_with_retry(
+                text=await FileHandler.get_description(soup, link, title=title_name),
+                source="auto",
+                target="english",
+            ).strip()
         except:
             try:
                 description = await FileHandler.get_description(soup, link, title=title_name)
@@ -820,9 +823,9 @@ class Crawler(commands.Cog):
             else:
                 title = ""
                 try:
-                    title = GoogleTranslator(
-                        source="auto", target="english"
-                    ).translate(title_name).strip()
+                    title = Translator.translate_with_retry(
+                        text=title_name, source="auto", target="english"
+                    ).strip()
                 except:
                     pass
                 title_name = title + "__" + title_name
@@ -963,8 +966,11 @@ class Crawler(commands.Cog):
                     text = ''
                 await f.write(text)
             if description is None or description.strip() == "":
-                description = GoogleTranslator(source="auto", target="english").translate(
-                    text[:500].strip().replace("\n\n", "\n"))
+                description = Translator.translate_with_retry(
+                    text=text[:500].strip().replace("\n\n", "\n"),
+                    source="auto",
+                    target="english",
+                )
                 description = description.replace(f"{title}", "")
             download_url = await FileHandler().crawlnsend(ctx, self.bot, title, title_name, original_Language,
                                                           description, thumbnail, link=link, library=library)
@@ -1279,9 +1285,9 @@ class Crawler(commands.Cog):
                 title = str(title[:100])
             else:
                 try:
-                    title = GoogleTranslator(
-                        source="auto", target="english"
-                    ).translate(title).strip()
+                    title = Translator.translate_with_retry(
+                        text=title, source="auto", target="english"
+                    ).strip()
                 except:
                     pass
                 title_name = title + "__" + title_name
@@ -1297,14 +1303,14 @@ class Crawler(commands.Cog):
         if title_name.strip().lower() == "001 - Read Novel Chapter 001 Online".lower():
             title_name = firstchplink.split("/")[-1].replace(".html", "")
         if title_name is None:
-            title_name = GoogleTranslator(
-                source="auto", target="english"
-            ).translate(title).strip()
+            title_name = Translator.translate_with_retry(
+                text=title, source="auto", target="english"
+            ).strip()
             if title_name is None:
                 title_name = await FileHandler.get_title(soup=soup)
-                title_name = GoogleTranslator(
-                    source="auto", target="english"
-                ).translate(title_name).strip()
+                title_name = Translator.translate_with_retry(
+                    text=title_name, source="auto", target="english"
+                ).strip()
                 title = title_name
         library: int = await FileHandler.checkLibrary(novel_data, title_name, title, original_Language, ctx, self.bot)
         if library == 0:
@@ -1337,14 +1343,20 @@ class Crawler(commands.Cog):
                 #     break
                 await asyncio.sleep(15)
         try:
-            description = GoogleTranslator().translate(await FileHandler.get_description(
-                soup=soup, link=firstchplink, next="true", title=org_title)).strip()
+            description = Translator.translate_with_retry(
+                text=await FileHandler.get_description(soup=soup, link=firstchplink, next="true", title=org_title),
+                source="auto",
+                target="english",
+            ).strip()
         except Exception as e:
             if hasattr(self.bot, 'logger'):
                 self.bot.logger.info(f"[crawlnext] Error getting description: {e}")
             try:
-                description = GoogleTranslator().translate(await FileHandler.get_description(
-                    soup=soup, link=firstchplink, title=org_title)).strip()
+                description = Translator.translate_with_retry(
+                    text=await FileHandler.get_description(soup=soup, link=firstchplink, title=org_title),
+                    source="auto",
+                    target="english",
+                ).strip()
             except Exception as e2:
                 if hasattr(self.bot, 'logger'):
                     self.bot.logger.info(f"[crawlnext] Error fallback description: {e2}")
@@ -1493,9 +1505,12 @@ class Crawler(commands.Cog):
                 await f.write(full_text)
             try:
                 if description is None or description.strip() == "":
-                    description = GoogleTranslator(source="auto", target="english").translate(
-                        await FileHandler.get_desc_from_text(full_text[:5000], title=org_title, link=firstchplink)[
-                              :500]).strip()
+                    description = Translator.translate_with_retry(
+                        text=await FileHandler.get_desc_from_text(full_text[:5000], title=org_title, link=firstchplink)[
+                              :500],
+                        source="auto",
+                        target="english",
+                    ).strip()
 
                 del self.bot.crawler_next[ctx.author.id]
             except:

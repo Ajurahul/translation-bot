@@ -13,7 +13,6 @@ import cloudscraper
 import discord
 # from StringProgressBar import progressBar
 from bs4 import BeautifulSoup
-from deep_translator import GoogleTranslator
 from discord import app_commands
 from discord.ext import commands
 
@@ -287,9 +286,9 @@ class Translate(commands.Cog):
         if rawname is not None:
             if not name_check:
                 try:
-                    name = GoogleTranslator(
-                        source="auto", target="english"
-                    ).translate(rawname).strip()
+                    name = Translator.translate_with_retry(
+                        text=rawname, source="auto", target="english"
+                    ).strip()
                     name_check = await FileHandler.checkname(name, self.bot)
                 except:
                     pass
@@ -529,8 +528,11 @@ class Translate(commands.Cog):
                     avatar = thumbnail
                 else:
                     avatar = await Hints.get_avatar()
-                des = GoogleTranslator().translate(
-                    await FileHandler.get_desc_from_text(novel[:5000], title=name, link=desc_link)).strip()
+                des = Translator.translate_with_retry(
+                    text=await FileHandler.get_desc_from_text(novel[:5000], title=name, link=desc_link),
+                    source="auto",
+                    target="english",
+                ).strip()
                 description = des.replace(f"{name}", "")
             except:
                 description = ""
@@ -637,8 +639,11 @@ class Translate(commands.Cog):
                 await f.write(story)
             if description.strip() == "":
                 try:
-                    description = GoogleTranslator(source="auto", target="english").translate(
-                        await FileHandler.get_desc_from_text(story[:10000], title=name)).strip()
+                    description = Translator.translate_with_retry(
+                        text=await FileHandler.get_desc_from_text(story[:10000], title=name),
+                        source="auto",
+                        target="english",
+                    ).strip()
                 except:
                     description = await FileHandler.get_desc_from_text(story[:10000], title=name)
             return await FileHandler().distribute(self.bot, ctx, name, language, original_Language, rawname,
