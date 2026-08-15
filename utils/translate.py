@@ -1,4 +1,5 @@
 import concurrent.futures
+import re
 import time
 import typing as t
 
@@ -16,22 +17,49 @@ class Translator:
 
     @staticmethod
     def _is_error_500_response(translated: t.List[str]) -> bool:
+        """Detect if response is a Google Translate error page."""
         if not translated:
             return False
 
         joined = " ".join(str(part) for part in translated).lower()
-        joined = joined.replace("’", "'")
+        joined = joined.replace("'", "'").replace("'", "'")
 
-        markers = (
+        # Error page markers
+        error_indicators = (
             "error 500",
             "server error",
             "that's an error",
             "there was an error",
             "please try again later",
+            "that's all we know",
         )
 
-        marker_hits = sum(marker in joined for marker in markers)
-        return "error 500" in joined and marker_hits >= 2
+        # Count how many error indicators are present
+        marker_hits = sum(indicator in joined for indicator in error_indicators)
+
+        # If we see "error 500" OR multiple error markers, it's an error response
+        is_error = ("error 500" in joined) or (marker_hits >= 2)
+
+        return is_error
+
+    @staticmethod
+    def _filter_error_text(text: str) -> str:
+        """Remove error messages from text as a safety measure."""
+        if not text:
+            return text
+
+        # Pattern to detect and remove error pages
+        error_patterns = [
+            r"Error 500.*?(?=\n[A-Za-zÀ-ÿ]|\Z)",  # Error 500 followed by actual text or end
+            r"(?:error|server error|that's an error|there was an error|please try again later).*?(?=\n[A-Za-zÀ-ÿ]|\Z)",
+        ]
+
+        result = text
+        for pattern in error_patterns:
+            import re
+            result = re.sub(pattern, "", result, flags=re.IGNORECASE | re.DOTALL)
+
+        return result.strip()
 
     @staticmethod
     def translate_with_retry(
@@ -90,33 +118,40 @@ class Translator:
         translated = []
         try:
             translated = self._translate_batch_with_retry(chapter)
+            # Final safety: filter any error text that slipped through
+            translated = [self._filter_error_text(str(t)) for t in translated if self._filter_error_text(str(t)).strip()]
         except Exception as e:
             try:
                 if "text must be a valid text" in str(e):
-                    for c in chapter:
+                    for c in chapter[:]:  # Use slice to avoid modifying while iterating
                         if not isinstance(c, str) or c.isdigit():
                             chapter.remove(c)
                     translated = self._translate_batch_with_retry(chapter)
+                    translated = [self._filter_error_text(str(t)) for t in translated if self._filter_error_text(str(t)).strip()]
                 else:
                     time.sleep(5)
-                    while True:
-                        chp1 = chapter[:len(chapter) // 2]
-                        chp2 = chapter[len(chapter) // 2:]
-                        try:
-                            translated = self._translate_batch_with_retry(chp1)
-                        except:
-                            translated = chp1
-                            translated.insert(0, "\n\n--->couldn't translate this part")
-                            chapter = chp1
-                        new_tr = []
-                        try:
-                            new_tr = self._translate_batch_with_retry(chp2)
-                        except:
-                            chp2.insert(0, "\n\n--->couldn't translate this part")
-                            chapter = chp2
-                        for tr in new_tr:
-                            translated.append(tr)
-                        break
+                    chp1 = chapter[:len(chapter) // 2]
+                    chp2 = chapter[len(chapter) // 2:]
+
+                    # Try first half
+                    try:
+                        translated = self._translate_batch_with_retry(chp1)
+                        translated = [self._filter_error_text(str(t)) for t in translated if self._filter_error_text(str(t)).strip()]
+                    except Exception as e1:
+                        translated = chp1
+                        translated.insert(0, "\n\n--->couldn't translate this part")
+
+                    # Try second half
+                    new_tr = []
+                    try:
+                        new_tr = self._translate_batch_with_retry(chp2)
+                        new_tr = [self._filter_error_text(str(t)) for t in new_tr if self._filter_error_text(str(t)).strip()]
+                    except Exception as e2:
+                        new_tr = chp2[:]
+                        new_tr.insert(0, "\n\n--->couldn't translate this part")
+
+                    for tr in new_tr:
+                        translated.append(tr)
             except:
                 for tr in chapter:
                     translated.append("\n\n--->couldn't translate this part")

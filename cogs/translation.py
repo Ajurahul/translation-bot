@@ -571,6 +571,8 @@ class Translate(commands.Cog):
             translate = Translator(self.bot, ctx.author.id, language)
             if len(liz) < 1700:
                 story = await translate.start(liz, len(asyncio.all_tasks()))
+                # Clean any error messages from the translated story
+                story = Translator._filter_error_text(story)
             else:
                 if ctx.author.id == 925597069748621353:
                     await asyncio.sleep(30)
@@ -618,6 +620,8 @@ class Translate(commands.Cog):
                 try:
                     async with aiofiles.open(filename, "r", encoding="utf-8", errors="ignore") as f:
                         story = await f.read()
+                    # Remove any lingering error messages from merged chunks
+                    story = Translator._filter_error_text(story)
                     os.remove(filename)
                     del chunks
                 except:
