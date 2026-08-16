@@ -4,8 +4,8 @@ jishaku==2.5.2
 bs4==0.0.1
 chardet==4.0.0
 StringProgressBar==1.1.1
-deep-translator==1.11.4
-discord-ext-menus 
+googletrans==4.0.2
+discord-ext-menus
 discord.py 
 parsel==1.8.1
 motor==3.3.1

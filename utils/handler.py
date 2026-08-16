@@ -16,7 +16,6 @@ import discord
 import docx
 import parsel
 from PyDictionary import PyDictionary
-from deep_translator import single_detection
 from discord.ext import commands
 # from epub2txt import epub2txt
 from readabilipy import simple_json_from_html_string
@@ -29,6 +28,7 @@ from core.views.linkview import LinkView
 from databases.data import Novel
 from languages import languages
 from utils.category import Categories
+from utils.translate import Translator
 
 from PIL import Image, ImageDraw
 
@@ -396,21 +396,21 @@ class FileHandler:
                       "xindingdian", "longteng", "akshu8", "qbtr"]:
                 if l in link:
                     return 'chinese (simplified)'
-        api_keys = ['8ca7a29f3b7c8ac85487451129f35c89', '1c2d644450cb8923818607150e7766d4',
-                    '5cd7b28759bb7aafe9b1d395824e7a67', 'af207e865e0277f375348293a30bcc5e']
         try:
             if "title_name " in text:
                 text = text.replace("title_name ", "")
-                lang_code = single_detection(str(text[:120]), api_key=random.choice(api_keys))
+                lang_code = await Translator.adetect_with_retry(str(text[:120]))
             else:
-                lang_code = single_detection(text[200:250].__str__(), api_key=random.choice(api_keys))
+                lang_code = await Translator.adetect_with_retry(text[200:250].__str__())
         except:
             try:
-                lang_code = single_detection(text[1:100].__str__(), api_key=random.choice(api_keys))
+                lang_code = await Translator.adetect_with_retry(text[1:100].__str__())
             except:
                 lang_code = 'NA'
-        if lang_code == 'zh':
+        if lang_code in ('zh', 'zh-cn'):
             original_Language = ['chinese (simplified)']
+        elif lang_code == 'zh-tw':
+            original_Language = ['chinese (traditional)']
         elif lang_code == 'NA':
             original_Language = ['NA']
         else:

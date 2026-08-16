@@ -286,9 +286,9 @@ class Translate(commands.Cog):
         if rawname is not None:
             if not name_check:
                 try:
-                    name = Translator.translate_with_retry(
+                    name = (await Translator.atranslate_with_retry(
                         text=rawname, source="auto", target="english"
-                    ).strip()
+                    )).strip()
                     name_check = await FileHandler.checkname(name, self.bot)
                 except:
                     pass
@@ -528,11 +528,11 @@ class Translate(commands.Cog):
                     avatar = thumbnail
                 else:
                     avatar = await Hints.get_avatar()
-                des = Translator.translate_with_retry(
+                des = (await Translator.atranslate_with_retry(
                     text=await FileHandler.get_desc_from_text(novel[:5000], title=name, link=desc_link),
                     source="auto",
                     target="english",
-                ).strip()
+                )).strip()
                 description = des.replace(f"{name}", "")
             except:
                 description = ""
@@ -643,11 +643,11 @@ class Translate(commands.Cog):
                 await f.write(story)
             if description.strip() == "":
                 try:
-                    description = Translator.translate_with_retry(
+                    description = (await Translator.atranslate_with_retry(
                         text=await FileHandler.get_desc_from_text(story[:10000], title=name),
                         source="auto",
                         target="english",
-                    ).strip()
+                    )).strip()
                 except:
                     description = await FileHandler.get_desc_from_text(story[:10000], title=name)
             return await FileHandler().distribute(self.bot, ctx, name, language, original_Language, rawname,
