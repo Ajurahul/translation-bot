@@ -18,6 +18,8 @@ class Library(commands.Cog):
         self.bot = bot
         # self.titles = joblib.load('titles.sav')
         self.sorted_data: list = ["_id", "title", "rating", "size", "uploader", "date"]
+        self.list_page_size: int = 12
+        self.list_page_char_limit: int = 3500
 
     @staticmethod
     def common_elements_finder(*args):
@@ -67,62 +69,154 @@ class Library(commands.Cog):
         menu.add_button(ff)
         return await menu.start()
 
-    async def make_base_embed(self, data: Novel) -> discord.Embed:
+    async def make_base_embed(
+            self,
+            data: Novel,
+            *,
+            position: int | None = None,
+            total: int | None = None,
+    ) -> discord.Embed:
+        title = self._compact_title(data["title"], max_len=120)
+        description = (data.get("description") or "No description.").strip()
+        if len(description) > 700:
+            description = f"{description[:697]}..."
+
         embed = discord.Embed(
-            title=f"**#{data['_id']} \t•\t {data['title'][:240].strip()}**",
-            url=data['download'],
-            description=f"```yaml\n{data['description'][:2000]}```"
-            if data['description']
-            else "No description.",
-            color=discord.Color.blue(),
+            title=f"#{data['_id']} • {title}",
+            url=data["download"],
+            description=f"> {description}",
+            color=discord.Color.blurple(),
         )
-        embed.add_field(name="Category", value=data['category'])
-        embed.add_field(name="Tags", value=f'```\n{", ".join(data["tags"])}```')
-        if not str(data["org_language"]).lower() == 'na':
-            embed.add_field(name="Raw Language", value=data["org_language"])
-        embed.add_field(name="Language", value=data["language"])
-        embed.add_field(name="Size", value=f"{round(data['size'] / (1024 ** 2), 2)} MB")
-        uploader = self.bot.get_user(data['uploader']) or await self.bot.fetch_user(
-            data['uploader']
-        )
+
+        size_mb = round(data["size"] / (1024 ** 2), 2)
+        rating = int(data.get("rating", 0))
+        stars = "⭐" * rating if rating > 0 else "No rating"
+
+        embed.add_field(name="Category", value=data["category"], inline=True)
+        embed.add_field(name="Language", value=data["language"], inline=True)
+        embed.add_field(name="Size", value=f"{size_mb} MB", inline=True)
+        embed.add_field(name="Rating", value=stars, inline=True)
+
+        if not str(data.get("org_language", "na")).lower() == "na":
+            embed.add_field(name="Raw Language", value=data["org_language"], inline=True)
+
+        tags = data.get("tags") or []
+        if tags:
+            tag_preview = ", ".join(tags[:10])
+            if len(tags) > 10:
+                tag_preview += ", ..."
+            embed.add_field(name="Tags", value=f"`{tag_preview}`", inline=False)
+
+        uploader = self.bot.get_user(data["uploader"]) or await self.bot.fetch_user(data["uploader"])
         try:
-            if data['crawled_from'] is not None:
-                embed.add_field(name="source", value=f"{data['crawled_from']}")
+            if data.get("crawled_from"):
+                embed.add_field(name="Source", value=f"{data['crawled_from']}", inline=False)
         except:
             pass
-        embed.add_field(name="Uploader", value=f"Uploaded by {uploader} \n{discord.utils.format_dt(datetime.datetime.fromtimestamp(data['date']), style='R')}")
-        embed.set_thumbnail(url=data['thumbnail'])
+
+        embed.add_field(
+            name="Uploader",
+            value=(
+                f"Uploaded by {uploader}\n"
+                f"{discord.utils.format_dt(datetime.datetime.fromtimestamp(data['date']), style='R')}"
+            ),
+            inline=False,
+        )
+
+        if data.get("thumbnail"):
+            embed.set_thumbnail(url=data["thumbnail"])
+
+        footer_prefix = f"Result {position}/{total} • " if position is not None and total is not None else ""
         embed.set_footer(
-            text=f"{'⭐' * int(data['rating'])} Hint : {await Hints.get_single_hint()}",
-            icon_url=uploader.display_avatar,
+            text=f"{footer_prefix}Hint: {await Hints.get_single_hint()}",
+            icon_url=await Hints.get_avatar(),
         )
         return embed
 
     async def make_list_embed(self, data: list[Novel]) -> list[discord.Embed]:
         embeds = []
-        for novel in data:
-            embeds.append(await self.make_base_embed(novel))
+        total = len(data)
+        for idx, novel in enumerate(data, start=1):
+            embeds.append(await self.make_base_embed(novel, position=idx, total=total))
         return embeds
 
-    async def make_base_list_embed(self, data: list[Novel], page: int) -> discord.Embed:
-        output = [
-            f"**#{novel['_id']}\t💠\t[{novel['title'].split('__')[0].strip()[:200]}]({novel['download']})**\n💠\tSize: **{round(novel['size'] / (1024 ** 2), 2)} MB**\t💠\tLanguage:** {novel['language']}** "
-            for novel in data]
-        out_str = "\n\n".join(output)
-        embed = discord.Embed(title=f"**Page {page}**",
-                              description=out_str)
-        embed.set_footer(text=f"Hint : {await Hints.get_single_hint()}", icon_url=await Hints.get_avatar())
+    async def make_base_list_embed(
+            self,
+            data: list[Novel],
+            page: int,
+            total_pages: int,
+            total_results: int,
+            start_index: int,
+    ) -> discord.Embed:
+        rows = [self._build_list_row(novel, start_index + idx) for idx, novel in enumerate(data, start=1)]
+        description = "\n\n".join(rows)
+        embed = discord.Embed(
+            title="Library Search Results",
+            description=description,
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(
+            name="Overview",
+            value=f"Page **{page}/{total_pages}** • Showing **{len(data)}** • Total **{total_results}**",
+            inline=False,
+        )
+        embed.set_footer(
+            text=f"Tip: use /library info <id> for details • Hint: {await Hints.get_single_hint()}",
+            icon_url=await Hints.get_avatar(),
+        )
         return embed
+
+    def _build_list_row(self, novel: Novel, index: int) -> str:
+        title = self._compact_title(novel["title"])
+        size_mb = round(novel["size"] / (1024 ** 2), 2)
+        rating = int(novel.get("rating", 0))
+        stars = "⭐" * rating if rating > 0 else "-"
+        return (
+            f"**{index}.** [{title}]({novel['download']})\n"
+            f"`#{novel['_id']}` • `{novel['language']}` • `{size_mb} MB` • {stars}"
+        )
+
+    @staticmethod
+    def _compact_title(title: str, max_len: int = 72) -> str:
+        clean = title.split("__")[0].strip().replace("\n", " ")
+        return clean if len(clean) <= max_len else f"{clean[:max_len - 1]}..."
 
     async def make_list_embed_list(self, data: list[Novel]) -> list[discord.Embed]:
         embeds = []
-        n = 6  # Number of novels per page
-        page = 1
+        pages: list[list[Novel]] = []
+        current_page: list[Novel] = []
+        current_chars = 0
 
-        for i in range(0, len(data), n):
-            page_data = data[i:i + n]
-            embeds.append(await self.make_base_list_embed(page_data, page))
-            page += 1
+        # Pack results by both item limit and character budget to keep embeds readable.
+        for novel in data:
+            preview_row = self._build_list_row(novel, 999)
+            projected = current_chars + len(preview_row) + 2
+            if current_page and (
+                    len(current_page) >= self.list_page_size or projected > self.list_page_char_limit
+            ):
+                pages.append(current_page)
+                current_page = []
+                current_chars = 0
+            current_page.append(novel)
+            current_chars += len(preview_row) + 2
+
+        if current_page:
+            pages.append(current_page)
+
+        total_pages = max(len(pages), 1)
+        total_results = len(data)
+        start_index = 0
+        for page_no, page_data in enumerate(pages, start=1):
+            embeds.append(
+                await self.make_base_list_embed(
+                    page_data,
+                    page=page_no,
+                    total_pages=total_pages,
+                    total_results=total_results,
+                    start_index=start_index,
+                )
+            )
+            start_index += len(page_data)
 
         return embeds
 
@@ -139,7 +233,7 @@ class Library(commands.Cog):
             title: str = None,
             language: str = None,
             rating: int = 0,
-            show_list: bool = False,
+            show_list: bool = True,
             category: str = None,
             tags: str = None,
             raw_language: str = None,
