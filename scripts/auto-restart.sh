@@ -2,6 +2,9 @@
 
 set -u
 
+# Cron on EC2 can run with a very small PATH.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOG_DIR="$REPO_DIR/logs"
@@ -10,14 +13,24 @@ HEALTH_FILE="$LOG_DIR/healthcheck.json"
 SESSION_NAME="ENTER"
 BOT_CMD="python3 main.py"
 HEALTH_MAX_AGE_SECONDS=180
+RUN_USER="${USER:-$(id -un 2>/dev/null || echo cron)}"
+
+PYTHON_BIN="$(command -v python3 2>/dev/null || true)"
+TMUX_BIN="$(command -v tmux 2>/dev/null || true)"
+GIT_BIN="$(command -v git 2>/dev/null || true)"
 
 mkdir -p "$LOG_DIR"
 
 log() {
   local nowtime
   nowtime="$(date '+%Y-%m-%d %H:%M:%S')"
-  echo "$USER : $1 at $nowtime" >> "$LOG_FILE"
+  echo "$RUN_USER : $1 at $nowtime" >> "$LOG_FILE"
 }
+
+if [[ -z "$PYTHON_BIN" || -z "$TMUX_BIN" || -z "$GIT_BIN" ]]; then
+  log "missing dependency python3/tmux/git (PATH=$PATH)"
+  exit 1
+fi
 
 get_bot_pid() {
   # Use the first matching bot process; empty output means not running.
@@ -25,7 +38,7 @@ get_bot_pid() {
 }
 
 is_tmux_pane_dead() {
-  tmux list-panes -t "$SESSION_NAME" -F '#{pane_dead}' 2>/dev/null | grep -qx '1'
+  "$TMUX_BIN" list-panes -t "$SESSION_NAME" -F '#{pane_dead}' 2>/dev/null | grep -qx '1'
 }
 
 get_mtime_epoch() {
@@ -49,13 +62,17 @@ is_healthcheck_stale() {
 restart_bot() {
   # Only kill the bot process/session, never all python/tmux processes.
   pkill -f "$BOT_CMD" 2>/dev/null || true
-  tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
+  "$TMUX_BIN" kill-session -t "$SESSION_NAME" 2>/dev/null || true
 
   cd "$REPO_DIR" || exit 1
-  git pull --ff-only || log "git pull failed"
+  "$GIT_BIN" pull --ff-only || log "git pull failed"
 
-  tmux new-session -d -s "$SESSION_NAME" "cd '$REPO_DIR' && exec $BOT_CMD"
-  log "started bot"
+  if "$TMUX_BIN" new-session -d -s "$SESSION_NAME" "cd '$REPO_DIR' && exec '$PYTHON_BIN' main.py"; then
+    log "started bot"
+  else
+    log "failed to start bot in tmux"
+    exit 1
+  fi
 }
 
 PID="$(get_bot_pid || true)"
@@ -77,7 +94,7 @@ if ps -o stat= -p "$PID" 2>/dev/null | grep -q 'Z'; then
   exit 0
 fi
 
-if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+if ! "$TMUX_BIN" has-session -t "$SESSION_NAME" 2>/dev/null; then
   log "tmux session missing, restarting"
   restart_bot
   exit 0
