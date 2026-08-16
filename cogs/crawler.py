@@ -393,7 +393,7 @@ class Crawler(commands.Cog):
                                    value="")
                 # value=progressBar.filledBar(int(split[1]), int(split[0]),
                 #                             size=10, line="🟥", slider="🟩")[
-                #           0] + f"  {discord.utils.format_dt(datetime.datetime.now(), style='R')}")
+                #           0] + f"  {discord.utils.format_dt(datetime.datetime.now(), style='R')}"
                 embed.set_image(url=await Progress.get_image_url(progress))
 
                 await msg.edit(embed=embed)
@@ -790,11 +790,11 @@ class Crawler(commands.Cog):
                 f"> ❌Provided link only got **{str(len(urls))}** links in the page.Check if you have provided correct Table of contents url. If there is no TOC page try using /crawlnext with first chapter and required urls"
             )
         try:
-            description = Translator.translate_with_retry(
+            description = (await Translator.atranslate_with_retry(
                 text=await FileHandler.get_description(soup, link, title=title_name),
                 source="auto",
                 target="english",
-            ).strip()
+            )).strip()
         except:
             try:
                 description = await FileHandler.get_description(soup, link, title=title_name)
@@ -823,9 +823,9 @@ class Crawler(commands.Cog):
             else:
                 title = ""
                 try:
-                    title = Translator.translate_with_retry(
+                    title = (await Translator.atranslate_with_retry(
                         text=title_name, source="auto", target="english"
-                    ).strip()
+                    )).strip()
                 except:
                     pass
                 title_name = title + "__" + title_name
@@ -966,7 +966,7 @@ class Crawler(commands.Cog):
                     text = ''
                 await f.write(text)
             if description is None or description.strip() == "":
-                description = Translator.translate_with_retry(
+                description = await Translator.atranslate_with_retry(
                     text=text[:500].strip().replace("\n\n", "\n"),
                     source="auto",
                     target="english",
@@ -1211,8 +1211,18 @@ class Crawler(commands.Cog):
             response.encoding = response.apparent_encoding
             sel = parsel.Selector(response.text)
             soup = BeautifulSoup(response.content, 'html5lib', from_encoding=response.encoding)
-            secondchplink = await self.bot.loop.run_in_executor(None, FileHandler.find_next_chps, soup, firstchplink)
-            # secondchplink = await FileHandler.find_next_chps(soup, firstchplink)
+            secondchplink = await self.bot.loop.run_in_executor(None, FileHandler.find_next_chps, soup,
+                                                                    firstchplink)
+            # secondchplink: str = await FileHandler.find_next_chps(soup, firstchplink)
+            if secondchplink is not None and secondchplink.strip() != "":
+                next_chp_find = True
+                path = ""
+                await ctx.send("> bot couldn't find the xpath automatically with given second link. but used "
+                                   "default finder to get the same", delete_after=5)
+            else:
+                return await ctx.send(
+                    "We couldn't find the selector for next chapter. Please check the links or provide the css "
+                    "selector or check with turning on cloudscrape as true")
         if "readwn" in firstchplink or "wuxiax.co" in firstchplink or "novelmt.com" in firstchplink or "fannovels.com" in firstchplink or "novelmtl.com" in firstchplink or "booktoki216.com" in firstchplink or "69shu" in firstchplink or "wuxiap.com" in firstchplink or "www.wuxiau.com" in firstchplink \
                 or "wuxiabee" in firstchplink or "biquzw789" in firstchplink or "novel543" in firstchplink:
             waittime = 1.0
@@ -1285,9 +1295,9 @@ class Crawler(commands.Cog):
                 title = str(title[:100])
             else:
                 try:
-                    title = Translator.translate_with_retry(
+                    title = (await Translator.atranslate_with_retry(
                         text=title, source="auto", target="english"
-                    ).strip()
+                    )).strip()
                 except:
                     pass
                 title_name = title + "__" + title_name
@@ -1303,14 +1313,14 @@ class Crawler(commands.Cog):
         if title_name.strip().lower() == "001 - Read Novel Chapter 001 Online".lower():
             title_name = firstchplink.split("/")[-1].replace(".html", "")
         if title_name is None:
-            title_name = Translator.translate_with_retry(
+            title_name = (await Translator.atranslate_with_retry(
                 text=title, source="auto", target="english"
-            ).strip()
+            )).strip()
             if title_name is None:
                 title_name = await FileHandler.get_title(soup=soup)
-                title_name = Translator.translate_with_retry(
+                title_name = (await Translator.atranslate_with_retry(
                     text=title_name, source="auto", target="english"
-                ).strip()
+                )).strip()
                 title = title_name
         library: int = await FileHandler.checkLibrary(novel_data, title_name, title, original_Language, ctx, self.bot)
         if library == 0:
@@ -1343,20 +1353,20 @@ class Crawler(commands.Cog):
                 #     break
                 await asyncio.sleep(15)
         try:
-            description = Translator.translate_with_retry(
+            description = (await Translator.atranslate_with_retry(
                 text=await FileHandler.get_description(soup=soup, link=firstchplink, next="true", title=org_title),
                 source="auto",
                 target="english",
-            ).strip()
+            )).strip()
         except Exception as e:
             if hasattr(self.bot, 'logger'):
                 self.bot.logger.info(f"[crawlnext] Error getting description: {e}")
             try:
-                description = Translator.translate_with_retry(
+                description = (await Translator.atranslate_with_retry(
                     text=await FileHandler.get_description(soup=soup, link=firstchplink, title=org_title),
                     source="auto",
                     target="english",
-                ).strip()
+                )).strip()
             except Exception as e2:
                 if hasattr(self.bot, 'logger'):
                     self.bot.logger.info(f"[crawlnext] Error fallback description: {e2}")
@@ -1505,12 +1515,12 @@ class Crawler(commands.Cog):
                 await f.write(full_text)
             try:
                 if description is None or description.strip() == "":
-                    description = Translator.translate_with_retry(
+                    description = (await Translator.atranslate_with_retry(
                         text=await FileHandler.get_desc_from_text(full_text[:5000], title=org_title, link=firstchplink)[
                               :500],
                         source="auto",
                         target="english",
-                    ).strip()
+                    )).strip()
 
                 del self.bot.crawler_next[ctx.author.id]
             except:

@@ -1,11 +1,13 @@
+import asyncio
 import concurrent.futures
 import re
 import time
 import typing as t
 
-from deep_translator import GoogleTranslator
+from googletrans import Translator as GoogleTransClient
 
 from core.bot import Raizel
+from languages import languages
 
 
 class Translator:
@@ -22,7 +24,7 @@ class Translator:
             return False
 
         joined = " ".join(str(part) for part in translated).lower()
-        joined = joined.replace("'", "'").replace("'", "'")
+        joined = joined.replace("’", "'")
 
         # Error page markers
         error_indicators = (
@@ -56,10 +58,98 @@ class Translator:
 
         result = text
         for pattern in error_patterns:
-            import re
             result = re.sub(pattern, "", result, flags=re.IGNORECASE | re.DOTALL)
 
         return result.strip()
+
+    @staticmethod
+    def _normalize_language(value: str, fallback: str = "en") -> str:
+        if not value:
+            return fallback
+        lang = str(value).strip().lower()
+        if lang == "auto":
+            return "auto"
+        if lang in languages.choices:
+            return str(languages.choices[lang]).lower()
+        return lang
+
+    @staticmethod
+    def _run_async_blocking(async_fn, *args, **kwargs):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(async_fn(*args, **kwargs))
+
+        # If called from an active event loop, run the async function in a helper thread.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(lambda: asyncio.run(async_fn(*args, **kwargs)))
+            return future.result()
+
+    @staticmethod
+    async def adetect_with_retry(
+            text: str,
+            retry_delays: t.Optional[t.List[int]] = None,
+    ) -> str:
+        delays = retry_delays or [2, 4, 7, 10]
+        last_error: t.Optional[Exception] = None
+        sample = str(text or "").strip()
+        if not sample:
+            return "NA"
+
+        for attempt in range(len(delays) + 1):
+            try:
+                async with GoogleTransClient() as translator:
+                    result = await translator.detect(sample)
+                lang = str(getattr(result, "lang", "NA") or "NA").lower()
+                return lang
+            except Exception as e:
+                last_error = e
+                if attempt < len(delays):
+                    await asyncio.sleep(delays[attempt])
+
+        raise last_error or RuntimeError("language detection failed after retries")
+
+    @staticmethod
+    def detect_with_retry(
+            text: str,
+            retry_delays: t.Optional[t.List[int]] = None,
+    ) -> str:
+        return Translator._run_async_blocking(
+            Translator.adetect_with_retry,
+            text,
+            retry_delays,
+        )
+
+    @staticmethod
+    async def atranslate_with_retry(
+            text: str,
+            target: str = "english",
+            source: str = "auto",
+            retry_delays: t.Optional[t.List[int]] = None,
+    ) -> str:
+        delays = retry_delays or [2, 4, 7, 10]
+        last_error: t.Optional[Exception] = None
+        target_code = Translator._normalize_language(target, fallback="en")
+        source_code = Translator._normalize_language(source, fallback="auto")
+
+        for attempt in range(len(delays) + 1):
+            try:
+                async with GoogleTransClient() as translator:
+                    translated = await translator.translate(
+                        str(text),
+                        dest=target_code,
+                        src=source_code,
+                    )
+                translated_text = str(getattr(translated, "text", translated))
+                if Translator._is_error_500_response([translated_text]):
+                    raise RuntimeError("translation returned Error 500 response body")
+                return Translator._filter_error_text(translated_text)
+            except Exception as e:
+                last_error = e
+                if attempt < len(delays):
+                    await asyncio.sleep(delays[attempt])
+
+        raise last_error or RuntimeError("translation failed after retries")
 
     @staticmethod
     def translate_with_retry(
@@ -68,19 +158,44 @@ class Translator:
             source: str = "auto",
             retry_delays: t.Optional[t.List[int]] = None,
     ) -> str:
+        return Translator._run_async_blocking(
+            Translator.atranslate_with_retry,
+            text,
+            target,
+            source,
+            retry_delays,
+        )
+
+    @staticmethod
+    async def atranslate_batch_with_retry(
+            chapter: t.List[str],
+            target: str,
+            source: str = "auto",
+            retry_delays: t.Optional[t.List[int]] = None,
+    ) -> t.List[str]:
         delays = retry_delays or [2, 4, 7, 10]
         last_error: t.Optional[Exception] = None
+        target_code = Translator._normalize_language(target, fallback="en")
+        source_code = Translator._normalize_language(source, fallback="auto")
 
         for attempt in range(len(delays) + 1):
             try:
-                translated = GoogleTranslator(source=source, target=target).translate(text)
-                if Translator._is_error_500_response([str(translated)]):
+                async with GoogleTransClient() as translator:
+                    translated = await translator.translate(
+                        chapter,
+                        dest=target_code,
+                        src=source_code,
+                    )
+                if not isinstance(translated, list):
+                    translated = [translated]
+                translated_texts = [str(getattr(item, "text", item)) for item in translated]
+                if Translator._is_error_500_response(translated_texts):
                     raise RuntimeError("translation returned Error 500 response body")
-                return translated
+                return [Translator._filter_error_text(text) for text in translated_texts]
             except Exception as e:
                 last_error = e
                 if attempt < len(delays):
-                    time.sleep(delays[attempt])
+                    await asyncio.sleep(delays[attempt])
 
         raise last_error or RuntimeError("translation failed after retries")
 
@@ -91,21 +206,13 @@ class Translator:
             source: str = "auto",
             retry_delays: t.Optional[t.List[int]] = None,
     ) -> t.List[str]:
-        delays = retry_delays or [2, 4, 7, 10]
-        last_error: t.Optional[Exception] = None
-
-        for attempt in range(len(delays) + 1):
-            try:
-                translated = GoogleTranslator(source=source, target=target).translate_batch(chapter)
-                if Translator._is_error_500_response(translated):
-                    raise RuntimeError("translation returned Error 500 response body")
-                return translated
-            except Exception as e:
-                last_error = e
-                if attempt < len(delays):
-                    time.sleep(delays[attempt])
-
-        raise last_error or RuntimeError("translation failed after retries")
+        return Translator._run_async_blocking(
+            Translator.atranslate_batch_with_retry,
+            chapter,
+            target,
+            source,
+            retry_delays,
+        )
 
     def _translate_batch_with_retry(self, chapter: t.List[str]) -> t.List[str]:
         return self.translate_batch_with_retry(
@@ -116,10 +223,18 @@ class Translator:
 
     def translate(self, chapter: t.List[str], num: int) -> t.Tuple[int, t.List[str]]:
         translated = []
+
+        def clean_parts(parts: t.List[str]) -> t.List[str]:
+            cleaned: t.List[str] = []
+            for part in parts:
+                value = self._filter_error_text(str(part))
+                if value.strip():
+                    cleaned.append(value)
+            return cleaned
+
         try:
             translated = self._translate_batch_with_retry(chapter)
-            # Final safety: filter any error text that slipped through
-            translated = [self._filter_error_text(str(t)) for t in translated if self._filter_error_text(str(t)).strip()]
+            translated = clean_parts(translated)
         except Exception as e:
             try:
                 if "text must be a valid text" in str(e):
@@ -127,7 +242,7 @@ class Translator:
                         if not isinstance(c, str) or c.isdigit():
                             chapter.remove(c)
                     translated = self._translate_batch_with_retry(chapter)
-                    translated = [self._filter_error_text(str(t)) for t in translated if self._filter_error_text(str(t)).strip()]
+                    translated = clean_parts(translated)
                 else:
                     time.sleep(5)
                     chp1 = chapter[:len(chapter) // 2]
@@ -136,7 +251,7 @@ class Translator:
                     # Try first half
                     try:
                         translated = self._translate_batch_with_retry(chp1)
-                        translated = [self._filter_error_text(str(t)) for t in translated if self._filter_error_text(str(t)).strip()]
+                        translated = clean_parts(translated)
                     except Exception as e1:
                         translated = chp1
                         translated.insert(0, "\n\n--->couldn't translate this part")
@@ -145,7 +260,7 @@ class Translator:
                     new_tr = []
                     try:
                         new_tr = self._translate_batch_with_retry(chp2)
-                        new_tr = [self._filter_error_text(str(t)) for t in new_tr if self._filter_error_text(str(t)).strip()]
+                        new_tr = clean_parts(new_tr)
                     except Exception as e2:
                         new_tr = chp2[:]
                         new_tr.insert(0, "\n\n--->couldn't translate this part")
