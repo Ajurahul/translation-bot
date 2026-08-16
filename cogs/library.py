@@ -279,6 +279,8 @@ class Library(commands.Cog):
             uploader_id = uploader.id
         else:
             uploader_id = None
+        if show_list is True and no_of_novels == 300:
+            no_of_novels = 1000
         allnovels = await self.bot.mongo.library.find_common(title=title, tag=tags, rating=rating, category=category, language=language, size=size, original_language=raw_language, uploader=uploader_id, no=no_of_novels)
         if not allnovels or allnovels == []:
             await ctx.send("> **No results found.**")
@@ -310,8 +312,6 @@ class Library(commands.Cog):
         full_size = 0
         if not allnovels:
             return await ctx.send("> **No results found.**")
-        if show_list is True and no_of_novels == 300:
-            no_of_novels = 1000
         if len(allnovels) >= no_of_novels:
             full_size = len(allnovels)
             allnovels = allnovels[:no_of_novels]
