@@ -155,11 +155,7 @@ class Library(commands.Cog):
             description=description,
             color=discord.Color.blurple(),
         )
-        embed.add_field(
-            name="Overview",
-            value=f"Page **{page}/{total_pages}** • Showing **{len(data)}** • Total **{total_results}**",
-            inline=False,
-        )
+
         embed.set_footer(
             text=f"Tip: use /library info <id> for details • Hint: {await Hints.get_single_hint()}",
             icon_url=await Hints.get_avatar(),
