@@ -192,10 +192,10 @@ class Translator:
     @staticmethod
     def get_no_of_workers(no_tasks, size) -> int:
         if size <= 700:
-            return 10
+            return 5
         elif size <= 1400:
-            return 9
+            return 4
         elif size <= 2000:
-            return 8
+            return 3
         else:
-            return min(no_tasks, 7) if no_tasks > 8 else 8
+            return min(no_tasks, 3) if no_tasks > 8 else 5
