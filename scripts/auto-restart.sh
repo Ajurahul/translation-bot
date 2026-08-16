@@ -60,14 +60,23 @@ is_healthcheck_stale() {
 }
 
 restart_bot() {
-  # Only kill the bot process/session, never all python/tmux processes.
+  # Requested legacy restart flow.
   pkill -f "$BOT_CMD" 2>/dev/null || true
+  pgrep python3 >/dev/null 2>&1 && killall python3
   "$TMUX_BIN" kill-session -t "$SESSION_NAME" 2>/dev/null || true
 
   cd "$REPO_DIR" || exit 1
   "$GIT_BIN" pull --ff-only || log "git pull failed"
 
-  if "$TMUX_BIN" new-session -d -s "$SESSION_NAME" "cd '$REPO_DIR' && exec '$PYTHON_BIN' main.py"; then
+  if ! "$TMUX_BIN" new-session -d -s "$SESSION_NAME"; then
+    log "failed to create tmux session"
+    exit 1
+  fi
+  "$TMUX_BIN" detach -s "$SESSION_NAME" 2>/dev/null || true
+  "$TMUX_BIN" send-keys -t "$SESSION_NAME":0 "cd '$REPO_DIR';$PYTHON_BIN main.py" ENTER
+
+  sleep 2
+  if pgrep -f "[p]ython3 main.py" >/dev/null 2>&1; then
     log "started bot"
   else
     log "failed to start bot in tmux"
