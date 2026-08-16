@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import json
 import logging
 import os
 import pickle
@@ -52,6 +53,10 @@ class Raizel(commands.Bot):
         self.translation_count: float = 0
         self.crawler_count = 0
         self.cache_max_messages = 100
+        self._heartbeat_task: Task | None = None
+        self.healthcheck_path = os.path.normpath(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'logs', 'healthcheck.json')
+        )
         super().__init__(
             command_prefix=commands.when_mentioned_or(".t"),
             intents=intents,
@@ -83,6 +88,8 @@ class Raizel(commands.Bot):
             print("cogs already loaded")
         self.allowed = sites
         self.logger = self.setup_logging()
+        await self.write_healthcheck(status="starting")
+        self._heartbeat_task = asyncio.create_task(self.heartbeat_loop())
         self.con = aiohttp.ClientSession()
         self.mongo = Mongo()
         self.logger.info("Connected to mongo db")
@@ -93,6 +100,30 @@ class Raizel(commands.Bot):
         asyncio.create_task(self.startup(channel=channel))
         self.logger.info("Bot is up now")
         return await super().setup_hook()
+
+    async def write_healthcheck(self, status: str = "running"):
+        os.makedirs(os.path.dirname(self.healthcheck_path), exist_ok=True)
+        payload = {
+            "status": status,
+            "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "pid": os.getpid(),
+            "uptime_seconds": int((datetime.datetime.utcnow() - self.boot).total_seconds()),
+            "app_status": self.app_status,
+            "closed": self.is_closed(),
+        }
+        temp_path = f"{self.healthcheck_path}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as fp:
+            json.dump(payload, fp)
+        os.replace(temp_path, self.healthcheck_path)
+
+    async def heartbeat_loop(self):
+        while not self.is_closed():
+            try:
+                await self.write_healthcheck(status="running")
+            except Exception as e:
+                if self.logger:
+                    self.logger.error(f"failed to write healthcheck: {e}")
+            await asyncio.sleep(30)
 
     async def startup(self, channel):
         try:
@@ -190,6 +221,21 @@ class Raizel(commands.Bot):
                 pass
             print('error occurred on connecting to Discord client... will try after 60 secs')
             print(e)
+
+    async def close(self) -> None:
+        try:
+            await self.write_healthcheck(status="stopping")
+        except Exception:
+            pass
+        if self._heartbeat_task is not None:
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+        return await super().close()
 
     @property
     def uptime(self) -> datetime.timedelta:
