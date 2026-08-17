@@ -35,33 +35,46 @@ class Library(commands.Cog):
         if len(lst) == 1:
             await ctx.send(embed=lst[0])
             return
-        menu = ViewMenu(ctx, menu_type=ViewMenu.TypeEmbed, remove_buttons_on_timeout=True, timeout=40)
+        menu = ViewMenu(
+            ctx,
+            menu_type=ViewMenu.TypeEmbed,
+            remove_buttons_on_timeout=True,
+            timeout=60,
+        )
         menu.add_pages(lst)
+
+        # ── First / Last (secondary – edge navigation) ──────────────────────
+        fb = ViewButton(
+            style=discord.ButtonStyle.secondary,
+            emoji="<:DoubleArrowLeft:989134953142956152>",
+            custom_id=ViewButton.ID_GO_TO_FIRST_PAGE,
+        )
+        ff = ViewButton(
+            style=discord.ButtonStyle.secondary,
+            emoji="<:DoubleArrowRight:989134892384256011>",
+            custom_id=ViewButton.ID_GO_TO_LAST_PAGE,
+        )
+
+        # ── Prev / Next (primary – main navigation) ──────────────────────────
         back = ViewButton(
-            style=discord.ButtonStyle.blurple,
+            style=discord.ButtonStyle.primary,
             emoji="<:ArrowLeft:989134685068202024>",
             custom_id=ViewButton.ID_PREVIOUS_PAGE,
         )
         after = ViewButton(
-            style=discord.ButtonStyle.blurple,
+            style=discord.ButtonStyle.primary,
             emoji="<:rightArrow:989136803284004874>",
             custom_id=ViewButton.ID_NEXT_PAGE,
         )
+
+        # ── Stop (danger – clearly a destructive / close action) ─────────────
         stop = ViewButton(
-            style=discord.ButtonStyle.blurple,
+            style=discord.ButtonStyle.danger,
             emoji="<:dustbin:989150297333043220>",
             custom_id=ViewButton.ID_END_SESSION,
         )
-        ff = ViewButton(
-            style=discord.ButtonStyle.blurple,
-            emoji="<:DoubleArrowRight:989134892384256011>",
-            custom_id=ViewButton.ID_GO_TO_LAST_PAGE,
-        )
-        fb = ViewButton(
-            style=discord.ButtonStyle.blurple,
-            emoji="<:DoubleArrowLeft:989134953142956152>",
-            custom_id=ViewButton.ID_GO_TO_FIRST_PAGE,
-        )
+
+        # Layout: ◀◀  ◀  🗑  ▶  ▶▶
         menu.add_button(fb)
         menu.add_button(back)
         menu.add_button(stop)
@@ -151,13 +164,15 @@ class Library(commands.Cog):
         rows = [self._build_list_row(novel, start_index + idx) for idx, novel in enumerate(data, start=1)]
         description = "\n\n".join(rows)
         embed = discord.Embed(
-            title="Library Search Results",
+            title=f"📚 Library  —  {total_results} result{'s' if total_results != 1 else ''}",
             description=description,
             color=discord.Color.blurple(),
         )
-
         embed.set_footer(
-            text=f"Tip: use /library info <id> for details • Hint: {await Hints.get_single_hint()}",
+            text=(
+                f"Page {page}/{total_pages}  •  /library info <id> for details  •  "
+                f"Hint: {await Hints.get_single_hint()}"
+            ),
             icon_url=await Hints.get_avatar(),
         )
         return embed
@@ -166,10 +181,12 @@ class Library(commands.Cog):
         title = self._compact_title(novel["title"])
         size_mb = round(novel["size"] / (1024 ** 2), 2)
         rating = int(novel.get("rating", 0))
-        stars = "⭐" * rating if rating > 0 else "-"
+        stars = "⭐" * rating if rating > 0 else "—"
+        category = novel.get("category", "").strip()
+        cat_badge = f" `{category}`" if category else ""
         return (
             f"**{index}.** [{title}]({novel['download']})\n"
-            f"`#{novel['_id']}` • `{novel['language']}` • `{size_mb} MB` • {stars}"
+            f"`#{novel['_id']}` • `{novel['language']}`{cat_badge} • `{size_mb} MB` • {stars}"
         )
 
     @staticmethod
