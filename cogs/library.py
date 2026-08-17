@@ -301,7 +301,6 @@ class Library(commands.Cog):
         allnovels = await self.bot.mongo.library.find_common(title=title, tag=tags, rating=rating, category=category, language=language, size=size, original_language=raw_language, uploader=uploader_id, no=no_of_novels)
         if not allnovels or allnovels == []:
             await ctx.send("> **No results found.**")
-            await msg.delete()
             return
 
         if shuffle and sort_by is None:
@@ -338,7 +337,6 @@ class Library(commands.Cog):
                 del allnovels
             except:
                 pass
-            await msg.delete()
             return await self.buttons(embeds, ctx)
         else:
             embeds = await self.make_list_embed(allnovels)
@@ -346,7 +344,6 @@ class Library(commands.Cog):
                 del allnovels
             except:
                 pass
-            await msg.delete()
             return await self.buttons(embeds, ctx)
 
     @library.command(name="random", help="Gives 10 random novel in library.")
