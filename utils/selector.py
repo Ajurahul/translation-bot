@@ -1,7 +1,8 @@
-class CssSelector:
+from functools import lru_cache
 
-    def findURLCSS(link):
-            domain_mappings = {
+
+class CssSelector:
+    URL_CSS_MAPPINGS = {
                 "m.bixiange.me": "#mycontent ::text",
                 "bixiange": "p ::text",
                 "bixiang": "p ::text",
@@ -126,16 +127,11 @@ class CssSelector:
                 "requimtl.com": "#content ::text",
                 "m.shuhaige": "#chapter > div.content ::text",
                 "www.fantinovels.com": "#htmlContent ::text",
-            "zeustranslations.blogspot.com": "#readingBox ::text",
-            "www.alicesw.com": "* ::text"
-        }
-            for domain, css_selector in domain_mappings.items():
-                if domain in link:
-                    return css_selector
-            return "* ::text"
+                "zeustranslations.blogspot.com": "#readingBox ::text",
+                "www.alicesw.com": "* ::text"
+    }
 
-    def findchptitlecss(link):
-        domain_mappings = {
+    CHAPTER_TITLE_MAPPINGS = {
             "trxs.me": [".infos>h1:first-child", ""],
             "trxs.cc": [".infos>h1:first-child", ""],
             "tongrenquan": [".infos>h1:first-child", ""],
@@ -191,16 +187,9 @@ class CssSelector:
             "requiemtls.com": ["div.infox > h1","div.epheader ::text"],
             "requimtl.com": ["head > title","h2 ::text"],  #body > div.min-h-screen...
             "www.alicesw.com": ["title", "title ::text"]
-        }
-        for domain, ret_array in domain_mappings.items():
-            if domain in link:
-                return ret_array
+    }
 
-        return ["h1", "title ::text"]
-
-
-    def find_next_selector(link):
-        domain_mappings = {
+    NEXT_SELECTOR_MAPPINGS = {
             "readwn": ["#chapter-article > header > div > aside > nav > div.action-select > a.chnav.next",
                        "#chapter-article > header > div > div > h1 > a"],
             "novelfull.com": ["#next_chap", "#chapter > div > div > a"],
@@ -272,9 +261,26 @@ class CssSelector:
             "m.shuhaige" : ["None", "#chapter > div.path > a:nth-child(3)"],
             "www.alicesw.com": ["None", "title"],
             # "requimtl.com": ["",]
-        }
-        for domain, ret_array in domain_mappings.items():
-            if domain in link:
-                return ret_array
+    }
 
-        return [None, "title"]
+    @staticmethod
+    def _find_mapping(link, domain_mappings, default):
+        for domain, value in domain_mappings.items():
+            if domain in link:
+                return value
+        return default
+
+    @staticmethod
+    @lru_cache(maxsize=512)
+    def findURLCSS(link):
+        return CssSelector._find_mapping(link, CssSelector.URL_CSS_MAPPINGS, "* ::text")
+
+    @staticmethod
+    @lru_cache(maxsize=512)
+    def findchptitlecss(link):
+        return CssSelector._find_mapping(link, CssSelector.CHAPTER_TITLE_MAPPINGS, ["h1", "title ::text"])
+
+    @staticmethod
+    @lru_cache(maxsize=512)
+    def find_next_selector(link):
+        return CssSelector._find_mapping(link, CssSelector.NEXT_SELECTOR_MAPPINGS, [None, "title"])

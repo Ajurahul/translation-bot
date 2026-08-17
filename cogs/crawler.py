@@ -74,14 +74,22 @@ class Crawler(commands.Cog):
         self.bot = bot
 
     @staticmethod
-    def easy(nums: int, links: str, css: str, chptitleCSS: str, scraper) -> t.Tuple[int, str]:
+    def _build_request_client(use_cloudscraper: bool = False):
+        client = cloudscraper.CloudScraper(delay=10) if use_cloudscraper else requests.Session()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
+        client.mount("http://", adapter)
+        client.mount("https://", adapter)
+        return client
+
+    @staticmethod
+    def easy(nums: int, links: str, css: str, chptitleCSS: str, requester=None) -> t.Tuple[int, str]:
         response = None
         retry_attempts = 3
         delay = 3
         for attempt in range(retry_attempts):
             try:
-                if scraper is not None:
-                    response = scraper.get(links, headers=FileHandler.get_handler(), timeout=20)
+                if requester is not None:
+                    response = requester.get(links, headers=FileHandler.get_handler(), timeout=20)
                 else:
                     response = requests.get(links, headers=FileHandler.get_handler(), timeout=20)
                 if response is not None:
@@ -152,26 +160,26 @@ class Crawler(commands.Cog):
             return 5
 
     def direct(self, urls: t.List[str], novel: t.Dict[int, str], name: int, cloudscrape: bool, tasks: int = 8) -> dict:
-        if cloudscrape:
-            scraper = cloudscraper.CloudScraper(delay=10)
-        else:
-            scraper = None
+        requester = self._build_request_client(use_cloudscraper=cloudscrape)
         workers = self.get_workers(tasks)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [
-                executor.submit(self.easy, i, j, self.urlcss, self.chptitlecss, scraper)
-                for i, j in enumerate(urls)
-            ]
-            for future in concurrent.futures.as_completed(futures):
-                result = future.result()
-                novel[result[0]] = result[1]
-                if self.bot.crawler[name] == "break":
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    return None
-                    # executor.
-                if len(novel) % 25 == 0:
-                    self.bot.crawler[name] = f"{len(novel)}/{len(urls)}"
-            return novel
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [
+                    executor.submit(self.easy, i, j, self.urlcss, self.chptitlecss, requester)
+                    for i, j in enumerate(urls)
+                ]
+                for future in concurrent.futures.as_completed(futures):
+                    result = future.result()
+                    novel[result[0]] = result[1]
+                    if self.bot.crawler[name] == "break":
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        return None
+                        # executor.
+                    if len(novel) % 25 == 0:
+                        self.bot.crawler[name] = f"{len(novel)}/{len(urls)}"
+                return novel
+        finally:
+            requester.close()
 
     async def getcontent(self, links: str, css: str, next_xpath, bot, tag, scraper, next_chp_finder: bool = False,
                          driver=None):
@@ -558,6 +566,8 @@ class Crawler(commands.Cog):
         if "www.xklxsw.com/" in link:
             link = link.replace("www", "m")
         res = None
+        scraper = None
+        request_client = None
         try:
             res = await self.bot.con.get(link)
         except Exception as e:
@@ -573,7 +583,7 @@ class Crawler(commands.Cog):
             if hasattr(self.bot, 'logger'):
                 self.bot.logger.info(f"[crawl] res is None for {link}")
         if cloudscrape:
-            scraper = cloudscraper.CloudScraper(delay=10)  # CloudScraper inherits from requests.Session
+            scraper = self._build_request_client(use_cloudscraper=True)
             response = scraper.get(link, timeout=10)
             response.encoding = response.apparent_encoding
             soup = BeautifulSoup(response.text, "html.parser", from_encoding=response.encoding)
@@ -599,7 +609,8 @@ class Crawler(commands.Cog):
             print(e)
             try:
                 title_name = ""
-                scraper = cloudscraper.CloudScraper(delay=10)  # CloudScraper inherits from requests.Session
+                if scraper is None:
+                    scraper = self._build_request_client(use_cloudscraper=True)
                 response = scraper.get(link, timeout=10)
                 response.encoding = response.apparent_encoding
                 html = response.text
@@ -708,7 +719,9 @@ class Crawler(commands.Cog):
                 link = link[:-1]
             response = None
             try:
-                response = requests.get(link, headers=headers, timeout=20)
+                if request_client is None:
+                    request_client = self._build_request_client()
+                response = request_client.get(link, headers=headers, timeout=20)
             except Exception as e:
                 print('error')
                 if hasattr(self.bot, 'logger'):
@@ -740,8 +753,9 @@ class Crawler(commands.Cog):
             else:
                 if hasattr(self.bot, 'logger'):
                     self.bot.logger.info(f"[crawl] response is None for {link}")
-        scraper = cloudscraper.CloudScraper(delay=10)
         if urls == [] or len(urls) < 30:
+            if scraper is None:
+                scraper = self._build_request_client(use_cloudscraper=True)
             response = scraper.get(link)
             soup = BeautifulSoup(response.text, "html.parser", from_encoding=response.encoding)
             urls = await find_urls(soup, link, name)
@@ -1017,6 +1031,12 @@ class Crawler(commands.Cog):
                 await FileHandler.update_status(self.bot)
             except:
                 pass
+            for client in (scraper, request_client):
+                if client is not None:
+                    try:
+                        client.close()
+                    except:
+                        pass
             if translate_to is None and add_terms is None:
                 try:
                     if (
@@ -1112,6 +1132,8 @@ class Crawler(commands.Cog):
         except:
             pass
         driver = None
+        scraper = None
+        request_client = None
         if "trxs" in firstchplink or "jpxs" in firstchplink or "bixiang" in firstchplink or "powanjuan" in firstchplink or "ffxs" in firstchplink or "qbtr" in firstchplink or "tongrenquan" in firstchplink:
             return await ctx.reply("> **Use crawl command**")
         if ctx.author.id in self.bot.crawler_next:
@@ -1186,13 +1208,16 @@ class Crawler(commands.Cog):
                 # Small wait for content to render
                 await asyncio.sleep(0.5)
             elif cloudscrape:
-                scraper = cloudscraper.CloudScraper(delay=10)
+                if scraper is None:
+                    scraper = self._build_request_client(use_cloudscraper=True)
                 response = scraper.get(firstchplink, headers=FileHandler.get_handler(), timeout=20)
                 await ctx.send("Cloudscrape is turned ON", delete_after=8)
                 await asyncio.sleep(0.25)
 
             else:
-                response = requests.get(firstchplink, headers=headers, timeout=20)
+                if request_client is None:
+                    request_client = self._build_request_client()
+                response = request_client.get(firstchplink, headers=headers, timeout=20)
         except Exception as e:
             if headless:
                 self.bot.logger.info(f"Error Occurred {e} {e.__traceback__}")
@@ -1256,7 +1281,9 @@ class Crawler(commands.Cog):
                 firstchplink = firstchplink.replace(".htm", "/")
             firstchplink = parsel.Selector(htm).css(
                 "#catalog > ul > li:nth-child(1) > a ::attr(href)").extract_first()
-            response = requests.get(firstchplink, headers=headers, timeout=20)
+            if request_client is None:
+                request_client = self._build_request_client()
+            response = request_client.get(firstchplink, headers=headers, timeout=20)
             response.encoding = response.apparent_encoding
             sel = parsel.Selector(response.text)
             soup = BeautifulSoup(response.content, 'html5lib', from_encoding=response.encoding)
@@ -1324,7 +1351,6 @@ class Crawler(commands.Cog):
         if (title is None or title == "") and headless:
             title = driver.title
         chp_count = 1
-        scraper = None
         # print(title)
         if "69shu" in firstchplink or "69xinshu.com" in firstchplink:
             title = title.split("-")[0]
@@ -1649,6 +1675,12 @@ class Crawler(commands.Cog):
                     driver.quit()
                 except:
                     pass
+            for client in (scraper, request_client):
+                if client is not None:
+                    try:
+                        client.close()
+                    except:
+                        pass
             try:
                 del full_text
             except:
