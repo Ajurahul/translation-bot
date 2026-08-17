@@ -77,7 +77,7 @@ class Library(commands.Cog):
         # Layout: ◀◀  ◀  🗑  ▶  ▶▶
         menu.add_button(fb)
         menu.add_button(back)
-        menu.add_button(stop)
+        # menu.add_button(stop)
         menu.add_button(after)
         menu.add_button(ff)
         return await menu.start()
