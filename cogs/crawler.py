@@ -37,7 +37,6 @@ from utils.hints import Hints
 from utils.progress import Progress
 from utils.selector import CssSelector
 from utils.translate import Translator
-from utils.headless_crawler import HeadlessCrawler, get_driver
 
 headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36"
@@ -62,8 +61,21 @@ async def find_urls(soup, link, name):
     return urls
 
 
-# Now imported from utils.headless_crawler with improved configuration
-# The improved get_driver() is automatically used when imported
+def get_driver():
+    options = webdriver.ChromeOptions()
+    options.add_argument("--headless")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920x1080")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+
+    # Add a user-agent string
+    options.add_argument(
+        "User-Agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36")
+
+    driver = webdriver.Chrome(options=options)
+    return driver
 
 
 class Crawler(commands.Cog):
@@ -181,56 +193,24 @@ class Crawler(commands.Cog):
         for _i in range(1, 5):
             try:
                 if driver is not None:
-                    # IMPROVED: Use better page loading strategy
                     try:
                         driver.get(links)
-                        # Wait for document.readyState
                         WebDriverWait(driver, 10).until(
                             lambda d: d.execute_script('return document.readyState') == 'complete'
                         )
-                        # Wait for content to stabilize (best effort)
-                        try:
-                            await asyncio.sleep(1)
-                            WebDriverWait(driver, 5).until(
-                                lambda d: len(d.page_source) > 500
-                            )
-                        except:
-                            pass  # Page source check is optional
                     except Exception as e:
-                        if hasattr(self.bot, 'logger'):
-                            self.bot.logger.info(f"[getcontent] Driver navigation error: {e}")
                         try:
                             driver.quit()
                             await asyncio.sleep(2)
                         except Exception as e2:
                             await asyncio.sleep(5)
                             pass
-                        # IMPROVED: Create new driver with better configuration
-                        driver = await self.bot.loop.run_in_executor(None, get_driver)
-                        if driver is None:
-                            if hasattr(self.bot, 'logger'):
-                                self.bot.logger.info(f"[getcontent] Failed to create new driver")
-                            if _i >= 4:
-                                return ['error', links]
-                            await asyncio.sleep(2)
-                            continue
-                        
+                        driver = get_driver()
                         driver.get(links)
                         WebDriverWait(driver, 10).until(
                             lambda d: d.execute_script('return document.readyState') == 'complete'
                         )
-                    
-                    # Extract page content with validation
-                    page_source = driver.page_source
-                    if not page_source or len(page_source) < 100:
-                        if hasattr(self.bot, 'logger'):
-                            self.bot.logger.info(f"[getcontent] Empty or invalid page source from {links}")
-                        if _i >= 4:
-                            return ['error', links]
-                        await asyncio.sleep(2)
-                        continue
-                    
-                    soup = BeautifulSoup(page_source, "html.parser")
+                    soup = BeautifulSoup(driver.page_source, "html.parser")
                 elif scraper is not None:
                     # Retry logic for scraper.get
                     retry_attempts = 3
@@ -1133,12 +1113,10 @@ class Crawler(commands.Cog):
             except Exception as e:
                 await ctx.send("> **Headless browser is turned on.. please be patient**")
                 headless = True
-                # IMPROVED: Use improved driver creation
                 driver = await self.bot.loop.run_in_executor(None, get_driver)
                 # return await ctx.send("We couldn't connect to the provided link. Please check the link")
         else:
             await ctx.send("> **Headless browser is turned on.. please be patient**")
-            # IMPROVED: Use improved driver creation
             driver = await self.bot.loop.run_in_executor(None, get_driver)
         if secondchplink in self.bot.all_langs:
             translate_to = secondchplink
@@ -1171,20 +1149,9 @@ class Crawler(commands.Cog):
         try:
             if headless:
                 driver.get(firstchplink)
-                # IMPROVED: Better wait strategy
                 WebDriverWait(driver, 10).until(
                     lambda d: d.execute_script('return document.readyState') == 'complete'
                 )
-                # Wait for body element and optional content stability
-                try:
-                    WebDriverWait(driver, 5).until(
-                        lambda d: d.find_element("tag name", "body")
-                    )
-                except:
-                    pass  # Optional, continue anyway
-                
-                # Small wait for content to render
-                await asyncio.sleep(0.5)
             elif cloudscrape:
                 scraper = cloudscraper.CloudScraper(delay=10)
                 response = scraper.get(firstchplink, headers=FileHandler.get_handler(), timeout=20)
@@ -1201,36 +1168,20 @@ class Crawler(commands.Cog):
             else:
                 await ctx.send("> **Headless browser is turned on.. please be patient**")
                 headless = True
-                # IMPROVED: Use improved driver creation
                 driver = await self.bot.loop.run_in_executor(None, get_driver)
                 driver.get(firstchplink)
                 WebDriverWait(driver, 10).until(
                     lambda d: d.execute_script('return document.readyState') == 'complete'
                 )
-                # Wait for content to be available
-                try:
-                    WebDriverWait(driver, 5).until(
-                        lambda d: d.find_element("tag name", "body")
-                    )
-                except:
-                    pass
         if not headless:
             if str(response.status_code).startswith('4'):
                 headless = True
                 await ctx.send("> **Headless browser is turned on.. please be patient**")
-                # IMPROVED: Use improved driver creation
                 driver = await self.bot.loop.run_in_executor(None, get_driver)
                 driver.get(firstchplink)
-                # IMPROVED: Better wait strategy
                 WebDriverWait(driver, 10).until(
                     lambda d: d.execute_script('return document.readyState') == 'complete'
                 )
-                try:
-                    WebDriverWait(driver, 5).until(
-                        lambda d: d.find_element("tag name", "body")
-                    )
-                except:
-                    pass
                 soup = BeautifulSoup(driver.page_source, "html.parser")
                 htm = driver.page_source
             else:
@@ -1465,14 +1416,7 @@ class Crawler(commands.Cog):
                             driver.close()
                         except:
                             pass
-                        # IMPROVED: Use better driver recreation with recovery
                         driver = await self.bot.loop.run_in_executor(None, get_driver)
-                        if driver is None:
-                            self.bot.logger.info("[crawlnext] Failed to create new driver")
-                            if repeats > 5:
-                                break
-                            await asyncio.sleep(2)
-                            continue
                     if current_link in crawled_urls and repeats > 5:
                         if i >= 30:
                             break
@@ -1513,13 +1457,7 @@ class Crawler(commands.Cog):
                                 driver.close()
                             except:
                                 pass
-                            # IMPROVED: Better driver recreation with validation
-                            new_driver = await self.bot.loop.run_in_executor(None, get_driver)
-                            if new_driver is not None:
-                                driver = new_driver
-                            else:
-                                self.bot.logger.info(f"[crawlnext] Failed to create new driver on attempt {no_of_tries}")
-                        
+                            driver = await self.bot.loop.run_in_executor(None, get_driver)
                         if no_of_tries > 30:
                             # await msg.delete()
                             del self.bot.crawler_next[ctx.author.id]
@@ -1548,19 +1486,7 @@ class Crawler(commands.Cog):
                                     driver.close()
                                 except:
                                     pass
-                                # IMPROVED: Periodic driver refresh for memory management
-                                new_driver = await self.bot.loop.run_in_executor(None, get_driver)
-                                if new_driver is not None:
-                                    driver = new_driver
-                                    self.bot.logger.info(
-                                        "[crawlnext] Driver refreshed every 50 chapters",
-                                        chapter=i,
-                                    )
-                                else:
-                                    self.bot.logger.warning(
-                                        "[crawlnext] Failed to refresh driver at chapter 50 interval",
-                                        chapter=i,
-                                    )
+                                driver = await self.bot.loop.run_in_executor(None, get_driver)
                             await asyncio.sleep(4.5 * waittime)
                     elif random.randint(0, 50) == 10 or chp_count % 100 == 0:
                         if headless:
@@ -1568,19 +1494,7 @@ class Crawler(commands.Cog):
                                 driver.close()
                             except:
                                 pass
-                            # IMPROVED: Periodic driver refresh for memory management
-                            new_driver = await self.bot.loop.run_in_executor(None, get_driver)
-                            if new_driver is not None:
-                                driver = new_driver
-                                self.bot.logger.info(
-                                    "[crawlnext] Driver refreshed for memory management",
-                                    chapter=chp_count,
-                                )
-                            else:
-                                self.bot.logger.warning(
-                                    "[crawlnext] Failed to refresh driver, continuing with old one",
-                                    chapter=chp_count,
-                                )
+                            driver = await self.bot.loop.run_in_executor(None, get_driver)
                         await asyncio.sleep(1)
                         full_text = full_text + f"\n\n for more novels ({random.randint(1000, 200000)}) join: https://discord.gg/SZxTKASsHq\n"
 
