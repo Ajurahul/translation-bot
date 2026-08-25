@@ -17,8 +17,6 @@ import aiofiles
 import discord
 import parsel
 import requests
-from requests.adapters import HTTPAdapter
-
 # from StringProgressBar import progressBar
 
 # import undetected_chromedriver as uc
@@ -78,57 +76,30 @@ class Crawler(commands.Cog):
     @staticmethod
     def _build_request_client(use_cloudscraper: bool = False):
         client = cloudscraper.CloudScraper(delay=10) if use_cloudscraper else requests.Session()
-        adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20)
+        adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
         client.mount("http://", adapter)
         client.mount("https://", adapter)
         return client
 
     @staticmethod
-    def _should_retry_status(status_code: int) -> bool:
-        return status_code in {408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
-
-    @staticmethod
-    def _is_non_retryable_client_error(status_code: int) -> bool:
-        return 400 <= status_code < 500 and not Crawler._should_retry_status(status_code)
-
-    @staticmethod
-    def _get_retry_delay(attempt: int, base_delay: float = 1.0, max_delay: float = 8.0) -> float:
-        delay = min(base_delay * (2 ** attempt), max_delay)
-        return delay + random.uniform(0, min(0.75, delay * 0.25))
-
-    @staticmethod
     def easy(nums: int, links: str, css: str, chptitleCSS: str, requester=None) -> t.Tuple[int, str]:
         response = None
         retry_attempts = 3
+        delay = 3
         for attempt in range(retry_attempts):
             try:
                 if requester is not None:
                     response = requester.get(links, headers=FileHandler.get_handler(), timeout=20)
                 else:
                     response = requests.get(links, headers=FileHandler.get_handler(), timeout=20)
-                if response is None:
-                    if attempt < retry_attempts - 1:
-                        time.sleep(Crawler._get_retry_delay(attempt, base_delay=1.0))
-                    continue
-
-                status_code = response.status_code
-                if Crawler._is_non_retryable_client_error(status_code):
-                    print(f"[easy] Non-retryable status {status_code} for {links}")
-                    return nums, "\n----x---\n"
-                if Crawler._should_retry_status(status_code):
-                    if attempt < retry_attempts - 1:
-                        time.sleep(Crawler._get_retry_delay(attempt, base_delay=1.0))
-                        continue
-                break
+                if response is not None:
+                    break
             except Exception as e:
                 print(f"[easy] Network error on attempt {attempt+1} for {links}: {e}")
-                if attempt < retry_attempts - 1:
-                    time.sleep(Crawler._get_retry_delay(attempt, base_delay=1.0))
+                time.sleep(delay)
+                delay = min(delay * 2, 10)
         else:
             print(f"[easy] All retry attempts failed for {links}")
-            return nums, f"\ncouldn't get connection to {links}\n"
-        if response is not None and Crawler._should_retry_status(response.status_code):
-            print(f"[easy] Retryable status {response.status_code} persisted for {links}")
             return nums, f"\ncouldn't get connection to {links}\n"
         if str(response.status_code).startswith('4'):
             print("Response received as error status code 404")
@@ -180,26 +151,17 @@ class Crawler(commands.Cog):
         response = scraper.get(links, headers=FileHandler.get_handler(), timeout=20)
         return response
 
-    def get_workers(self, tasks: int, url_count: int):
-        if url_count <= 25:
-            workers = 2
-        elif url_count <= 100:
-            workers = 3
-        elif url_count <= 400:
-            workers = 4
+    def get_workers(self, tasks: int):
+        if tasks < 8:
+            return 8
+        elif tasks <= 9:
+            return 6
         else:
-            workers = 4
-
-        if tasks >= 8:
-            workers = min(workers, 2)
-        elif tasks >= 5:
-            workers = min(workers, 3)
-
-        return max(2, workers)
+            return 5
 
     def direct(self, urls: t.List[str], novel: t.Dict[int, str], name: int, cloudscrape: bool, tasks: int = 8) -> dict:
         requester = self._build_request_client(use_cloudscraper=cloudscrape)
-        workers = self.get_workers(tasks, len(urls))
+        workers = self.get_workers(tasks)
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
                 futures = [
@@ -260,12 +222,12 @@ class Crawler(commands.Cog):
                                 return ['error', links]
                             await asyncio.sleep(2)
                             continue
-
+                        
                         driver.get(links)
                         WebDriverWait(driver, 10).until(
                             lambda d: d.execute_script('return document.readyState') == 'complete'
                         )
-
+                    
                     # Extract page content with validation
                     page_source = driver.page_source
                     if not page_source or len(page_source) < 100:
@@ -275,89 +237,65 @@ class Crawler(commands.Cog):
                             return ['error', links]
                         await asyncio.sleep(2)
                         continue
-
+                    
                     soup = BeautifulSoup(page_source, "html.parser")
                 elif scraper is not None:
                     # Retry logic for scraper.get
                     retry_attempts = 3
+                    delay = 2
                     for attempt in range(retry_attempts):
                         try:
                             response = await self.bot.loop.run_in_executor(None, self.scrape, scraper, links)
-                            if response is None:
-                                if attempt < retry_attempts - 1:
-                                    await asyncio.sleep(self._get_retry_delay(attempt, base_delay=1.0))
-                                continue
-
-                            status_code = response.status_code
-                            if self._is_non_retryable_client_error(status_code):
-                                if hasattr(self.bot, 'logger'):
-                                    self.bot.logger.info(f"[getcontent] non-retryable scraper status {status_code} for {links}")
-                                return ['error', links]
-                            if self._should_retry_status(status_code):
-                                if attempt < retry_attempts - 1:
-                                    await asyncio.sleep(self._get_retry_delay(attempt, base_delay=1.0))
-                                    continue
-                            break
+                            if response is not None:
+                                break
                         except Exception as e:
                             if hasattr(self.bot, 'logger'):
                                 self.bot.logger.info(f"[getcontent] scraper.get error on attempt {attempt+1} for {links}: {e}")
-                            if attempt < retry_attempts - 1:
-                                await asyncio.sleep(self._get_retry_delay(attempt, base_delay=1.0))
+                            await asyncio.sleep(delay)
+                            delay = min(delay * 2, 10)
                     if response is not None:
-                        if self._should_retry_status(response.status_code):
-                            if hasattr(self.bot, 'logger'):
-                                self.bot.logger.info(f"[getcontent] retryable scraper status persisted for {links}: {response.status_code}")
-                            return ['error', links]
                         response.encoding = response.apparent_encoding
                         soup = BeautifulSoup(response.text, "html.parser", from_encoding=response.encoding)
                         if str(response.status_code).startswith('4'):
-                            if hasattr(self.bot, 'logger'):
-                                self.bot.logger.info(f"[getcontent] 4xx error for {links}")
-                            return ['error', links]
+                            if _i >= 4:
+                                if hasattr(self.bot, 'logger'):
+                                    self.bot.logger.info(f"[getcontent] 4xx error for {links}")
+                                return ['error', links]
+                            else:
+                                await asyncio.sleep(2)
+                                continue
                     else:
                         if hasattr(self.bot, 'logger'):
                             self.bot.logger.info(f"[getcontent] response is None for {links}")
                         if _i >= 4:
                             return ['error', links]
                         else:
-                            await asyncio.sleep(self._get_retry_delay(_i - 1, base_delay=1.0))
+                            await asyncio.sleep(2)
                             continue
                 else:
                     # Retry logic for bot.con.get
                     retry_attempts = 3
+                    delay = 2
                     for attempt in range(retry_attempts):
                         try:
                             response = await bot.con.get(links, headers=FileHandler.get_handler())
-                            if response is None:
-                                if attempt < retry_attempts - 1:
-                                    await asyncio.sleep(self._get_retry_delay(attempt, base_delay=1.0))
-                                continue
-
-                            status_code = response.status
-                            if self._is_non_retryable_client_error(status_code):
-                                if hasattr(self.bot, 'logger'):
-                                    self.bot.logger.info(f"[getcontent] non-retryable bot.con status {status_code} for {links}")
-                                return ['error', links]
-                            if self._should_retry_status(status_code):
-                                if attempt < retry_attempts - 1:
-                                    await asyncio.sleep(self._get_retry_delay(attempt, base_delay=1.0))
-                                    continue
-                            break
+                            if response is not None:
+                                break
                         except Exception as e:
                             if hasattr(self.bot, 'logger'):
                                 self.bot.logger.info(f"[getcontent] bot.con.get error on attempt {attempt+1} for {links}: {e}")
-                            if attempt < retry_attempts - 1:
-                                await asyncio.sleep(self._get_retry_delay(attempt, base_delay=1.0))
+                            await asyncio.sleep(delay)
+                            delay = min(delay * 2, 10)
                     if response is not None:
-                        if self._should_retry_status(response.status):
-                            if hasattr(self.bot, 'logger'):
-                                self.bot.logger.info(f"[getcontent] retryable bot.con status persisted for {links}: {response.status}")
-                            return ['error', links]
                         soup = BeautifulSoup(await response.read(), "html.parser", from_encoding=response.get_encoding())
                         if response.status == 404:
-                            if hasattr(self.bot, 'logger'):
-                                self.bot.logger.info(f"[getcontent] 404 error for {links}")
-                            return ['error', links]
+                            if _i >= 4:
+                                await asyncio.sleep(2)
+                                if hasattr(self.bot, 'logger'):
+                                    self.bot.logger.info(f"[getcontent] 404 error for {links}")
+                                return ['error', links]
+                            else:
+                                continue
                     else:
                         if hasattr(self.bot, 'logger'):
                             self.bot.logger.info(f"[getcontent] response is None for {links}")
@@ -365,7 +303,6 @@ class Crawler(commands.Cog):
                             await asyncio.sleep(3)
                             return ['error', links]
                         else:
-                            await asyncio.sleep(self._get_retry_delay(_i - 1, base_delay=1.0))
                             continue
             except Exception as e:
                 if hasattr(self.bot, 'logger'):
