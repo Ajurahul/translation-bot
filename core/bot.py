@@ -34,6 +34,8 @@ class Raizel(commands.Bot):
         self.log_path = None
         self.blocked = None
         self.logger = None
+        # Set up logging immediately so it's available to all cogs from the start
+        self.logger = self.setup_logging()
         intents = discord.Intents.all()
         intents.members = True
         intents.message_content = True
@@ -87,7 +89,9 @@ class Raizel(commands.Bot):
             print(traceback.print_exc())
             print("cogs already loaded")
         self.allowed = sites
-        self.logger = self.setup_logging()
+        # Logger is already set up in __init__; re-apply log_path here in case setup_hook runs fresh
+        if self.logger is None:
+            self.logger = self.setup_logging()
         await self.write_healthcheck(status="starting")
         self._heartbeat_task = asyncio.create_task(self.heartbeat_loop())
         self.con = aiohttp.ClientSession()
@@ -204,11 +208,21 @@ class Raizel(commands.Bot):
         self.log_path = os.path.normpath(self.log_path)
         os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
         formatter = logging.Formatter('%(asctime)s %(levelname)-8s %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-        _logger = logging.getLogger(__name__)
-        _logger.setLevel(logging.INFO)
-        loghandler = RotatingFileHandler(encoding="utf-8", filename=self.log_path, maxBytes=10 * 1024 * 1024, backupCount=2)
+        _logger = logging.getLogger("raizel_bot")
+        _logger.setLevel(logging.DEBUG)
+        _logger.propagate = False
+        # Remove existing handlers to avoid duplicates on re-setup
+        _logger.handlers.clear()
+        # File handler (rotating, 10MB max, keep 5 backups)
+        loghandler = RotatingFileHandler(encoding="utf-8", filename=self.log_path, maxBytes=10 * 1024 * 1024, backupCount=5)
         loghandler.setFormatter(formatter)
+        loghandler.setLevel(logging.DEBUG)
         _logger.addHandler(loghandler)
+        # Stream handler so errors are visible in console/systemd journal
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(formatter)
+        stream_handler.setLevel(logging.INFO)
+        _logger.addHandler(stream_handler)
         return _logger
 
     async def start(self) -> None:

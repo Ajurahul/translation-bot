@@ -106,7 +106,7 @@ class Crawler(commands.Cog):
             print(f"[easy] All retry attempts failed for {links}")
             return nums, f"\ncouldn't get connection to {links}\n"
         if str(response.status_code).startswith('4'):
-            print("Response received as error status code 404")
+            print(f"[easy] 4xx status {response.status_code} for {links}")
             return nums, "\n----x---\n"
         response.encoding = response.apparent_encoding
         full = ""
@@ -169,21 +169,28 @@ class Crawler(commands.Cog):
         else:
             scraper = None
         workers = self.get_workers(tasks)
+        self.bot.logger.info(f"[direct] Starting | user={name} | urls={len(urls)} | workers={workers} | cloudscrape={cloudscrape}")
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             futures = [
                 executor.submit(self.easy, i, j, self.urlcss, self.chptitlecss, scraper)
                 for i, j in enumerate(urls)
             ]
             for future in concurrent.futures.as_completed(futures):
-                result = future.result()
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    self.bot.logger.error(f"[direct] Thread exception | user={name} | error={exc}")
+                    continue
                 novel[result[0]] = result[1]
-                if self.bot.crawler[name] == "break":
+                if self.bot.crawler.get(name) == "break":
+                    self.bot.logger.info(f"[direct] Break requested | user={name} | completed={len(novel)}/{len(urls)}")
                     executor.shutdown(wait=False, cancel_futures=True)
                     return None
-                    # executor.
                 if len(novel) % 25 == 0:
                     self.bot.crawler[name] = f"{len(novel)}/{len(urls)}"
-            return novel
+                    self.bot.logger.debug(f"[direct] Progress | user={name} | {len(novel)}/{len(urls)}")
+        self.bot.logger.info(f"[direct] Completed | user={name} | total={len(novel)}/{len(urls)}")
+        return novel
 
     async def getcontent(self, links: str, css: str, next_xpath, bot, tag, scraper, next_chp_finder: bool = False,
                          driver=None):
@@ -498,6 +505,7 @@ class Crawler(commands.Cog):
         if self.bot.app_status == "restart":
             return await ctx.reply(
                 f"> Bot is scheduled to restart within 60 sec or after all current tasks are completed.. Please try after bot is restarted")
+        self.bot.logger.info(f"[crawl] Command started | user={ctx.author} ({ctx.author.id}) | link={link} | translate_to={translate_to} | reverse={reverse} | max_chapters={max_chapters}")
         cloudscrape: bool = False
         if link is None:
             return await ctx.reply(f"> **❌Enter a link for crawling.**")
@@ -554,7 +562,7 @@ class Crawler(commands.Cog):
                 self.bot.logger.info(f"[crawl] res is None for {link}")
         if cloudscrape:
             scraper = cloudscraper.CloudScraper(delay=10)  # CloudScraper inherits from requests.Session
-            response = scraper.get(link, timeout=10)
+            response = await self.bot.loop.run_in_executor(None, lambda: scraper.get(link, timeout=10))
             response.encoding = response.apparent_encoding
             soup = BeautifulSoup(response.text, "html.parser", from_encoding=response.encoding)
             soup1 = soup
@@ -564,8 +572,8 @@ class Crawler(commands.Cog):
             else:
                 await ctx.send("> **Cloudflare is detected.. Turned on  the cloudscraper**", delete_after=10)
         else:
-            soup = BeautifulSoup(await res.read(), "html.parser", from_encoding=res.get_encoding())
             data = await res.read()
+            soup = BeautifulSoup(data, "html.parser", from_encoding=res.get_encoding())
             soup1 = BeautifulSoup(data, "lxml", from_encoding=res.get_encoding())
 
         self.titlecss = CssSelector.findchptitlecss(link)
@@ -580,7 +588,7 @@ class Crawler(commands.Cog):
             try:
                 title_name = ""
                 scraper = cloudscraper.CloudScraper(delay=10)  # CloudScraper inherits from requests.Session
-                response = scraper.get(link, timeout=10)
+                response = await self.bot.loop.run_in_executor(None, lambda: scraper.get(link, timeout=10))
                 response.encoding = response.apparent_encoding
                 html = response.text
                 sel = parsel.Selector(html)
@@ -688,7 +696,7 @@ class Crawler(commands.Cog):
                 link = link[:-1]
             response = None
             try:
-                response = requests.get(link, headers=headers, timeout=20)
+                response = await self.bot.loop.run_in_executor(None, lambda: requests.get(link, headers=headers, timeout=20))
             except Exception as e:
                 print('error')
                 if hasattr(self.bot, 'logger'):
@@ -722,7 +730,7 @@ class Crawler(commands.Cog):
                     self.bot.logger.info(f"[crawl] response is None for {link}")
         scraper = cloudscraper.CloudScraper(delay=10)
         if urls == [] or len(urls) < 30:
-            response = scraper.get(link)
+            response = await self.bot.loop.run_in_executor(None, lambda: scraper.get(link))
             soup = BeautifulSoup(response.text, "html.parser", from_encoding=response.encoding)
             urls = await find_urls(soup, link, name)
             if len(urls) > 30:
@@ -879,9 +887,11 @@ class Crawler(commands.Cog):
             if library is not None:
                 await ctx.reply(content=f"> Updating {str(library)} with name : {title_name}")
             if len(urls) < 1700:
+                self.bot.logger.info(f"[crawl] Starting direct crawl | user={ctx.author.id} | url_count={len(urls)} | cloudscrape={cloudscrape}")
                 book = await self.bot.loop.run_in_executor(
                     None, self.direct, urls, novel, ctx.author.id, cloudscrape, len(asyncio.all_tasks())
                 )
+                self.bot.logger.info(f"[crawl] direct() finished | user={ctx.author.id} | chapters_got={len(book) if book else 'None/stopped'}")
                 if book is None:
                     return await ctx.reply("Crawling stopped")
                 parsed = {k: v for k, v in sorted(book.items(), key=lambda item: item[0])}
@@ -914,6 +924,7 @@ class Crawler(commands.Cog):
                     book = await self.bot.loop.run_in_executor(
                         None, self.direct, chunk, novel, ctx.author.id, cloudscrape, len(asyncio.all_tasks()) + 1
                     )
+                    self.bot.logger.info(f"[crawl] Chunk {cnt}/{len(chunks)} done | user={ctx.author.id} | chapters={len(book) if book else 'None'}")
                     if book is None:
                         return await ctx.reply("Crawling stopped")
                     parsed = {k: v for k, v in sorted(book.items(), key=lambda item: item[0])}
@@ -975,10 +986,9 @@ class Crawler(commands.Cog):
             download_url = await FileHandler().crawlnsend(ctx, self.bot, title, title_name, original_Language,
                                                           description, thumbnail, link=link, library=library)
         except Exception as e:
-            self.bot.logger.info(f"Error Occurred {e} {e.__traceback__}")
+            self.bot.logger.error(f"[crawl] EXCEPTION | user={ctx.author.id} | link={link} | error={e}\n{traceback.format_exc()}")
             await ctx.send("> Error occurred .Please report to admin +\n" + str(e))
             print(traceback.format_exc())
-            raise e
         finally:
             try:
                 del text
@@ -1101,6 +1111,7 @@ class Crawler(commands.Cog):
         if self.bot.app_status == "restart":
             return await ctx.reply(
                 f"> Bot is scheduled to restart within 60 sec  or after all current tasks are completed.. Please try after bot is restarted")
+        self.bot.logger.info(f"[crawlnext] Command started | user={ctx.author} ({ctx.author.id}) | firstchplink={firstchplink} | translate_to={translate_to} | noofchapters={noofchapters} | headless={headless}")
         title_css = "title"
         thumbnail = ""
         cloudscrape: bool = False
@@ -1154,12 +1165,12 @@ class Crawler(commands.Cog):
                 )
             elif cloudscrape:
                 scraper = cloudscraper.CloudScraper(delay=10)
-                response = scraper.get(firstchplink, headers=FileHandler.get_handler(), timeout=20)
+                response = await self.bot.loop.run_in_executor(None, lambda: scraper.get(firstchplink, headers=FileHandler.get_handler(), timeout=20))
                 await ctx.send("Cloudscrape is turned ON", delete_after=8)
                 await asyncio.sleep(0.25)
 
             else:
-                response = requests.get(firstchplink, headers=headers, timeout=20)
+                response = await self.bot.loop.run_in_executor(None, lambda: requests.get(firstchplink, headers=headers, timeout=20))
         except Exception as e:
             if headless:
                 self.bot.logger.info(f"Error Occurred {e} {e.__traceback__}")
@@ -1207,7 +1218,7 @@ class Crawler(commands.Cog):
                 firstchplink = firstchplink.replace(".htm", "/")
             firstchplink = parsel.Selector(htm).css(
                 "#catalog > ul > li:nth-child(1) > a ::attr(href)").extract_first()
-            response = requests.get(firstchplink, headers=headers, timeout=20)
+            response = await self.bot.loop.run_in_executor(None, lambda: requests.get(firstchplink, headers=headers, timeout=20))
             response.encoding = response.apparent_encoding
             sel = parsel.Selector(response.text)
             soup = BeautifulSoup(response.content, 'html5lib', from_encoding=response.encoding)
@@ -1406,10 +1417,13 @@ class Crawler(commands.Cog):
                 for i in range(1, noofchapters):
                     try:
                         if self.bot.crawler_next[ctx.author.id] == "break":
+                            self.bot.logger.info(f"[crawlnext] Break signal received | user={ctx.author.id} | chp={i}")
                             return await ctx.send("> **Stopped Crawling...**")
                     except:
                         break
                     self.bot.crawler_next[ctx.author.id] = f"{i}/{noofchapters}"
+                    if i % 10 == 0:
+                        self.bot.logger.debug(f"[crawlnext] Progress | user={ctx.author.id} | chp={i}/{noofchapters} | current_link={current_link}")
                     if current_link in crawled_urls:
                         repeats += 1
                         try:
@@ -1508,8 +1522,8 @@ class Crawler(commands.Cog):
                     await msg.edit(embed=embed, view=view)
                 except:
                     pass
-            except:
-                pass
+            except Exception as _loop_exc:
+                self.bot.logger.error(f"[crawlnext] Exception in crawl loop | user={ctx.author.id} | chp={chp_count} | current_link={current_link} | error={_loop_exc}\n{traceback.format_exc()}")
 
             async with aiofiles.open(f"{ctx.author.id}_cr.txt", 'w', encoding='utf-8', errors="ignore") as f:
                 await f.write(full_text)
@@ -1551,10 +1565,9 @@ class Crawler(commands.Cog):
             else:
                 return
         except Exception as e:
-            self.bot.logger.info(f"Error Occurred {e} {e.__traceback__}")
+            self.bot.logger.error(f"[crawlnext] EXCEPTION | user={ctx.author.id} | firstchplink={firstchplink} | chp={chp_count if 'chp_count' in dir() else '?'} | error={e}\n{traceback.format_exc()}")
             print(traceback.format_exc())
             await ctx.send("> Error occurred .Please report to admin +\n" + str(e))
-            raise e
         finally:
             if self.bot.chrome == 1:
                 self.bot.chrome = 0
