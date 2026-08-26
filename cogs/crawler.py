@@ -808,6 +808,7 @@ class Crawler(commands.Cog):
                 description = await FileHandler.get_description(soup, link, title=title_name)
             except:
                 description = ""
+        print("description fetched")
         if 'b.faloo' in link or 'wap.faloo' in link:
             urls = urls[:200]
         if "www.uukanshu.com" in link or "www.uukanshu.net" in link:
@@ -840,6 +841,7 @@ class Crawler(commands.Cog):
                 title = str(title[:100])
         novel_data = await self.bot.mongo.library.get_novel_by_name(title_name.split('__')[0])
         library: int = await FileHandler.checkLibrary(novel_data, title_name, title, original_Language, ctx, self.bot)
+        print(f"library : {library.__sizeof__()}")
         if library == 0:
             return None
         if ctx.author.id in self.bot.crawler:
@@ -867,7 +869,8 @@ class Crawler(commands.Cog):
                 await asyncio.sleep(15)
         try:
             self.bot.crawler[ctx.author.id] = f"0/{len(urls)}"
-            self.bot.crawler_tasks[ctx.author.id] = asyncio.current_task()
+            # self.bot.crawler_tasks[ctx.author.id] = asyncio.current_task()
+            print("crawler started")
             await FileHandler.update_status(self.bot)
             try:
                 thumbnail = await FileHandler().get_thumbnail(soup, link)
