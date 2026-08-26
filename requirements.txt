@@ -6,8 +6,9 @@ chardet==4.0.0
 StringProgressBar==1.1.1
 googletrans==4.0.2
 deep-translator==1.11.4
+translators
 discord-ext-menus
-discord.py 
+discord.py
 parsel==1.8.1
 motor==3.3.1
 reactionmenu~=3.1.4

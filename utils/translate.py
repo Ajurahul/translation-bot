@@ -14,6 +14,13 @@ import typing as t
 from deep_translator import GoogleTranslator as DeepGoogleTranslator
 from googletrans import Translator as GoogleTransClient
 
+try:
+    import translators as bing_translators
+    _BING_AVAILABLE = True
+except ImportError:
+    bing_translators = None
+    _BING_AVAILABLE = False
+
 from core.bot import Raizel
 from languages import languages
 
@@ -35,12 +42,36 @@ class Translator:
 
     DEEP_TRANSLATOR_FALLBACK_AFTER = 2
 
+    # deep_translator/googletrans use Google's own language codes (from
+    # languages.py). Bing/Microsoft expects different codes for a few of
+    # these -- notably Chinese. Only include entries where they actually
+    # differ; anything not listed here is passed through unchanged (this
+    # covers ko/en/id and the vast majority of other languages already).
+    BING_LANGUAGE_OVERRIDES: t.Dict[str, str] = {
+        "zh-cn": "zh-Hans",
+        "zh-tw": "zh-Hant",
+        "iw": "he",     # Google's old code for Hebrew
+        "tl": "fil",    # Google uses "tl" (Tagalog) for what Bing calls Filipino
+    }
+
     # Which engine to try first. Starts as "deep" (matches old default
     # behaviour) and is updated to whichever engine last succeeded, so
     # future calls skip straight to the one that's currently working
     # instead of re-trying a dead engine every time.
     _preferred_engine = "deep"
     _preferred_engine_lock = threading.Lock()
+
+    # --- Circuit breaker -------------------------------------------------
+    # If an engine keeps failing across *any* worker (not just within a
+    # single call's own retry loop), put it in a short cooldown so every
+    # other concurrent chunk stops wasting attempts on it too. This matters
+    # a lot once you have several chunks translating in parallel: without
+    # this, each one independently retries the dead engine before falling
+    # back, all at the same time.
+    ENGINE_COOLDOWN_THRESHOLD = 3       # consecutive global failures before cooldown
+    ENGINE_COOLDOWN_SECONDS = 30        # how long to avoid a tripped engine
+    _engine_failure_counts: t.Dict[str, int] = {}
+    _engine_cooldown_until: t.Dict[str, float] = {}
 
     def __init__(self, bot: Raizel, user: int, language: str) -> None:
         self.bot = bot
@@ -57,6 +88,43 @@ class Translator:
         if cls._preferred_engine != engine:
             with cls._preferred_engine_lock:
                 cls._preferred_engine = engine
+
+    @classmethod
+    def _is_engine_cooling_down(cls, engine: str) -> bool:
+        until = cls._engine_cooldown_until.get(engine)
+        return until is not None and time.time() < until
+
+    @classmethod
+    def _note_engine_failure(cls, engine: str) -> None:
+        with cls._preferred_engine_lock:
+            count = cls._engine_failure_counts.get(engine, 0) + 1
+            if count >= cls.ENGINE_COOLDOWN_THRESHOLD:
+                cls._engine_cooldown_until[engine] = time.time() + cls.ENGINE_COOLDOWN_SECONDS
+                count = 0
+            cls._engine_failure_counts[engine] = count
+
+    @classmethod
+    def _note_engine_success(cls, engine: str) -> None:
+        with cls._preferred_engine_lock:
+            cls._engine_failure_counts[engine] = 0
+            cls._engine_cooldown_until.pop(engine, None)
+
+    @classmethod
+    def _get_engine_order(cls) -> t.List[str]:
+        """Preferred engine first, with anything currently cooling down
+        pushed to the back (but never fully excluded -- if every engine
+        happens to be cooling down, we still need something to try)."""
+        all_engines = ["deep", "googletrans"]
+        if _BING_AVAILABLE:
+            all_engines.append("bing")
+
+        preferred = cls._get_preferred_engine()
+        if preferred not in all_engines:
+            preferred = all_engines[0]
+        order = [preferred] + [e for e in all_engines if e != preferred]
+        healthy = [e for e in order if not cls._is_engine_cooling_down(e)]
+        cooling = [e for e in order if cls._is_engine_cooling_down(e)]
+        return healthy + cooling
 
     @staticmethod
     def _is_error_500_response(translated: t.List[str]) -> bool:
@@ -205,6 +273,50 @@ class Translator:
         return [str(getattr(item, "text", item)) for item in translated]
 
     @staticmethod
+    def _to_bing_code(code: str) -> str:
+        if not code or code == "auto":
+            return "auto"
+        return Translator.BING_LANGUAGE_OVERRIDES.get(code.lower(), code)
+
+    @staticmethod
+    async def _translate_text_with_bing(
+            text: str,
+            target_code: str,
+            source_code: str,
+    ) -> str:
+        def _work() -> str:
+            result = bing_translators.translate_text(
+                str(text),
+                translator="bing",
+                from_language=Translator._to_bing_code(source_code),
+                to_language=Translator._to_bing_code(target_code),
+            )
+            return str(result)
+
+        return await asyncio.to_thread(_work)
+
+    @staticmethod
+    async def _translate_batch_with_bing(
+            chapter: t.List[str],
+            target_code: str,
+            source_code: str,
+    ) -> t.List[str]:
+        def _work() -> t.List[str]:
+            from_code = Translator._to_bing_code(source_code)
+            to_code = Translator._to_bing_code(target_code)
+            return [
+                str(bing_translators.translate_text(
+                    str(item),
+                    translator="bing",
+                    from_language=from_code,
+                    to_language=to_code,
+                ))
+                for item in chapter
+            ]
+
+        return await asyncio.to_thread(_work)
+
+    @staticmethod
     async def _translate_text_with_engine(
             engine: str,
             text: str,
@@ -213,6 +325,10 @@ class Translator:
     ) -> str:
         if engine == "deep":
             return await Translator._translate_text_with_deep(
+                text=text, target_code=target_code, source_code=source_code,
+            )
+        if engine == "bing":
+            return await Translator._translate_text_with_bing(
                 text=text, target_code=target_code, source_code=source_code,
             )
         return await Translator._translate_text_with_googletrans(
@@ -228,6 +344,10 @@ class Translator:
     ) -> t.List[str]:
         if engine == "deep":
             return await Translator._translate_batch_with_deep(
+                chapter=chapter, target_code=target_code, source_code=source_code,
+            )
+        if engine == "bing":
+            return await Translator._translate_batch_with_bing(
                 chapter=chapter, target_code=target_code, source_code=source_code,
             )
         return await Translator._translate_batch_with_googletrans(
@@ -280,23 +400,23 @@ class Translator:
             source: str = "auto",
             retry_delays: t.Optional[t.List[int]] = None,
     ) -> str:
-        delays = retry_delays or [2, 4, 7, 10]
+        delays = retry_delays or [1, 3, 6, 8, 10]
         last_error: t.Optional[Exception] = None
         target_code = Translator._normalize_language(target, fallback="en")
         source_code = Translator._normalize_language(source, fallback="auto")
 
-        # Try whichever engine last worked, first. Only fall back to the
-        # other engine after it's failed a few times in a row.
-        primary_engine = Translator._get_preferred_engine()
-        secondary_engine = "googletrans" if primary_engine == "deep" else "deep"
+        # Try whichever engine last worked, first (skipping anything
+        # currently in cooldown from repeated failures elsewhere), and only
+        # fall back to the other engine after it's failed a couple of times.
+        engine_order = Translator._get_engine_order()
         current_engine_failures = 0
 
         for attempt in range(len(delays) + 1):
-            engine = (
-                primary_engine
-                if current_engine_failures < Translator.DEEP_TRANSLATOR_FALLBACK_AFTER
-                else secondary_engine
+            engine_index = min(
+                current_engine_failures // Translator.DEEP_TRANSLATOR_FALLBACK_AFTER,
+                len(engine_order) - 1,
             )
+            engine = engine_order[engine_index]
             try:
                 translated_text = await Translator._translate_text_with_engine(
                     engine=engine,
@@ -307,9 +427,11 @@ class Translator:
 
                 cleaned = Translator._validate_and_clean_translations([translated_text])
                 Translator._set_preferred_engine(engine)
+                Translator._note_engine_success(engine)
                 return cleaned[0]
             except Exception as e:
                 last_error = e
+                Translator._note_engine_failure(engine)
                 current_engine_failures += 1
                 if attempt < len(delays):
                     await asyncio.sleep(delays[attempt])
@@ -338,21 +460,20 @@ class Translator:
             source: str = "auto",
             retry_delays: t.Optional[t.List[int]] = None,
     ) -> t.List[str]:
-        delays = retry_delays or [2, 4, 7, 10]
+        delays = retry_delays or [1, 3, 6, 8, 10]
         last_error: t.Optional[Exception] = None
         target_code = Translator._normalize_language(target, fallback="en")
         source_code = Translator._normalize_language(source, fallback="auto")
 
-        primary_engine = Translator._get_preferred_engine()
-        secondary_engine = "googletrans" if primary_engine == "deep" else "deep"
+        engine_order = Translator._get_engine_order()
         current_engine_failures = 0
 
         for attempt in range(len(delays) + 1):
-            engine = (
-                primary_engine
-                if current_engine_failures < Translator.DEEP_TRANSLATOR_FALLBACK_AFTER
-                else secondary_engine
+            engine_index = min(
+                current_engine_failures // Translator.DEEP_TRANSLATOR_FALLBACK_AFTER,
+                len(engine_order) - 1,
             )
+            engine = engine_order[engine_index]
             try:
                 translated_texts = await Translator._translate_batch_with_engine(
                     engine=engine,
@@ -363,9 +484,11 @@ class Translator:
 
                 cleaned = Translator._validate_and_clean_translations(translated_texts)
                 Translator._set_preferred_engine(engine)
+                Translator._note_engine_success(engine)
                 return cleaned
             except Exception as e:
                 last_error = e
+                Translator._note_engine_failure(engine)
                 current_engine_failures += 1
                 if attempt < len(delays):
                     await asyncio.sleep(delays[attempt])
