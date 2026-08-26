@@ -480,13 +480,16 @@ class Translate(commands.Cog):
                     if "discord.gg" in url:
                         continue
                         # urls.remove(url)
-                    response = await self.bot.loop.run_in_executor(None, scraper.get, url)
+                    response = await self.bot.loop.run_in_executor(None, lambda u=url: scraper.get(u, timeout=8))
                     soup = BeautifulSoup(response.text, "lxml")
                     # print(f"url  {url}")
                     thumbnail: str = await FileHandler().get_thumbnail(soup=soup, link=url)
                     # print(f"thub {thumbnail}")
                     if thumbnail is not None and thumbnail.strip() != "":
-                        if scraper.get(thumbnail).status_code == 200:
+                        thumb_resp = await self.bot.loop.run_in_executor(
+                            None, lambda t=thumbnail: scraper.get(t, timeout=8)
+                        )
+                        if thumb_resp.status_code == 200:
                             # print("break")
                             novel_url = url
                             break
@@ -495,14 +498,22 @@ class Translate(commands.Cog):
                             thumbnail = ""
                     if thumbnail == "":
                         try:
-                            for img in soup.find_all('img'):
+                            # Cap how many <img> tags we probe -- each one is a
+                            # network round trip, and an unbounded loop over
+                            # every image on a page (run one at a time, no
+                            # timeout) is what was freezing startup for minutes
+                            # on pages with lots of images or a slow img host.
+                            for img in soup.find_all('img')[:15]:
                                 img_url = urljoin(url, img.get('src'))
-                                if scraper.get(img_url).status_code == 200:
+                                img_resp = await self.bot.loop.run_in_executor(
+                                    None, lambda iu=img_url: scraper.get(iu, timeout=5)
+                                )
+                                if img_resp.status_code == 200:
                                     if "jpg" in img_url.lower() or "jpeg" in img_url.lower():
                                         temp.insert(0, img_url)
                                     else:
                                         temp.append(img_url)
-                        except:
+                        except Exception:
                             pass
                 except Exception as e:
                     print(e)

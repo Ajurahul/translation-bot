@@ -80,12 +80,6 @@ class Translator:
     _engine_cooldown_until: t.Dict[str, float] = {}
     _engine_lock = threading.Lock()
 
-    # Whichever engine most recently succeeded gets tried first on the next
-    # job -- e.g. if deep failed but googletrans worked last time, the next
-    # job starts with googletrans (and tries deep after). Starts as None,
-    # meaning "use ENGINE_SEQUENCE's default order" (deep first).
-    _preferred_engine: t.Optional[str] = None
-
     def __init__(self, bot: Raizel, user: int, language: str) -> None:
         self.bot = bot
         self.user = user
@@ -105,36 +99,26 @@ class Translator:
                 cls._engine_cooldown_until[engine] = time.time() + cls.ENGINE_COOLDOWN_SECONDS
                 count = 0
             cls._engine_failure_counts[engine] = count
-            # This engine just failed -- if it was the preferred one, clear
-            # that so the next job doesn't lead with a known-bad engine.
-            if cls._preferred_engine == engine:
-                cls._preferred_engine = None
 
     @classmethod
     def _note_engine_success(cls, engine: str) -> None:
         with cls._engine_lock:
             cls._engine_failure_counts[engine] = 0
             cls._engine_cooldown_until.pop(engine, None)
-            cls._preferred_engine = engine
 
     @classmethod
     def _get_engine_order(cls) -> t.List[str]:
-        """Whichever engine last succeeded goes first, then the rest of
-        ENGINE_SEQUENCE (deep -> googletrans -> bing) in their normal
-        order. Anything currently cooling down is skipped entirely --
-        that's the whole point of the cooldown, otherwise every worker
-        keeps re-paying the timeout cost of a known-broken engine on
-        every single round. The only exception: if *every* engine is
-        cooling down, we still need something to try, so in that case
-        we fall back to the full order rather than trying nothing."""
-        preferred = cls._preferred_engine
-        if preferred in cls.ENGINE_SEQUENCE:
-            order = [preferred] + [e for e in cls.ENGINE_SEQUENCE if e != preferred]
-        else:
-            order = list(cls.ENGINE_SEQUENCE)
-
-        healthy = [e for e in order if not cls._is_engine_cooling_down(e)]
-        return healthy if healthy else order
+        """Fixed deep -> googletrans -> bing order. `deep` is the cheap,
+        reliable, low-latency engine and should always be tried first
+        while it's healthy -- googletrans/bing are pure fallbacks for
+        when deep is down, not alternatives to promote just because they
+        happened to succeed once (they're both noticeably slower per call
+        even when they work, so promoting them tanks average throughput).
+        Anything currently cooling down (repeated recent failures) is
+        skipped entirely, unless every engine is cooling down, in which
+        case we fall back to trying all of them rather than nothing."""
+        healthy = [e for e in cls.ENGINE_SEQUENCE if not cls._is_engine_cooling_down(e)]
+        return healthy if healthy else list(cls.ENGINE_SEQUENCE)
 
     @staticmethod
     def _is_error_500_response(translated: t.List[str]) -> bool:
@@ -377,7 +361,7 @@ class Translator:
             text: str,
             retry_delays: t.Optional[t.List[int]] = None,
     ) -> str:
-        delays = retry_delays or [2, 4, 7, 10]
+        delays = retry_delays or [2, 5]
         last_error: t.Optional[Exception] = None
         sample = str(text or "").strip()
         if not sample:
@@ -385,12 +369,15 @@ class Translator:
 
         for attempt in range(len(delays) + 1):
             try:
-                async with GoogleTransClient(
-                        timeout=Timeout(15.0),
-                        raise_exception=True,
-                        service_urls=Translator.GOOGLETRANS_SERVICE_URLS,
-                ) as translator:
-                    result = await translator.detect(sample)
+                async def _detect():
+                    async with GoogleTransClient(
+                            timeout=Timeout(10.0),
+                            raise_exception=True,
+                            service_urls=Translator.GOOGLETRANS_SERVICE_URLS,
+                    ) as translator:
+                        return await translator.detect(sample)
+
+                result = await asyncio.wait_for(_detect(), timeout=10.0)
                 lang = str(getattr(result, "lang", "NA") or "NA").lower()
                 return lang
             except Exception as e:
