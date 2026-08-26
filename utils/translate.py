@@ -69,8 +69,13 @@ class Translator:
     # every engine happens to be cooling down at once we still try all of
     # them anyway (see _get_engine_order), so a round is never skipped
     # entirely.
-    ENGINE_COOLDOWN_THRESHOLD = 3       # consecutive global failures before cooldown
-    ENGINE_COOLDOWN_SECONDS = 30        # how long to avoid a tripped engine
+    ENGINE_COOLDOWN_THRESHOLD = 2        # consecutive global failures before cooldown
+    ENGINE_COOLDOWN_SECONDS = 90         # how long to avoid a tripped engine
+    # Hard ceiling on a single engine call. Without this, a stalled/blocked
+    # engine (no response, connection hangs) can block a worker thread far
+    # longer than any of the retry_delays below would suggest -- this is
+    # what turns a handful of bad chunks into a 45-minute job.
+    ENGINE_CALL_TIMEOUT_SECONDS = 10
     _engine_failure_counts: t.Dict[str, int] = {}
     _engine_cooldown_until: t.Dict[str, float] = {}
     _engine_lock = threading.Lock()
@@ -116,9 +121,12 @@ class Translator:
     def _get_engine_order(cls) -> t.List[str]:
         """Whichever engine last succeeded goes first, then the rest of
         ENGINE_SEQUENCE (deep -> googletrans -> bing) in their normal
-        order. Within that, anything currently cooling down is pushed to
-        the back (never dropped entirely -- if every engine is cooling
-        down we still need something to try)."""
+        order. Anything currently cooling down is skipped entirely --
+        that's the whole point of the cooldown, otherwise every worker
+        keeps re-paying the timeout cost of a known-broken engine on
+        every single round. The only exception: if *every* engine is
+        cooling down, we still need something to try, so in that case
+        we fall back to the full order rather than trying nothing."""
         preferred = cls._preferred_engine
         if preferred in cls.ENGINE_SEQUENCE:
             order = [preferred] + [e for e in cls.ENGINE_SEQUENCE if e != preferred]
@@ -126,8 +134,7 @@ class Translator:
             order = list(cls.ENGINE_SEQUENCE)
 
         healthy = [e for e in order if not cls._is_engine_cooling_down(e)]
-        cooling = [e for e in order if cls._is_engine_cooling_down(e)]
-        return healthy + cooling
+        return healthy if healthy else order
 
     @staticmethod
     def _is_error_500_response(translated: t.List[str]) -> bool:
@@ -327,16 +334,22 @@ class Translator:
             source_code: str,
     ) -> str:
         if engine == "deep":
-            return await Translator._translate_text_with_deep(
+            coro = Translator._translate_text_with_deep(
                 text=text, target_code=target_code, source_code=source_code,
             )
-        if engine == "bing":
-            return await Translator._translate_text_with_bing(
+        elif engine == "bing":
+            coro = Translator._translate_text_with_bing(
                 text=text, target_code=target_code, source_code=source_code,
             )
-        return await Translator._translate_text_with_googletrans(
-            text=text, target_code=target_code, source_code=source_code,
-        )
+        else:
+            coro = Translator._translate_text_with_googletrans(
+                text=text, target_code=target_code, source_code=source_code,
+            )
+        # Hard ceiling so a stalled engine can never block a worker
+        # indefinitely -- deep_translator and translators (bing) don't
+        # enforce their own timeout, so without this a single hung call
+        # can eat minutes instead of failing over to the next engine.
+        return await asyncio.wait_for(coro, timeout=Translator.ENGINE_CALL_TIMEOUT_SECONDS)
 
     @staticmethod
     async def _translate_batch_with_engine(
@@ -346,16 +359,18 @@ class Translator:
             source_code: str,
     ) -> t.List[str]:
         if engine == "deep":
-            return await Translator._translate_batch_with_deep(
+            coro = Translator._translate_batch_with_deep(
                 chapter=chapter, target_code=target_code, source_code=source_code,
             )
-        if engine == "bing":
-            return await Translator._translate_batch_with_bing(
+        elif engine == "bing":
+            coro = Translator._translate_batch_with_bing(
                 chapter=chapter, target_code=target_code, source_code=source_code,
             )
-        return await Translator._translate_batch_with_googletrans(
-            chapter=chapter, target_code=target_code, source_code=source_code,
-        )
+        else:
+            coro = Translator._translate_batch_with_googletrans(
+                chapter=chapter, target_code=target_code, source_code=source_code,
+            )
+        return await asyncio.wait_for(coro, timeout=Translator.ENGINE_CALL_TIMEOUT_SECONDS)
 
     @staticmethod
     async def adetect_with_retry(
@@ -403,12 +418,13 @@ class Translator:
             source: str = "auto",
             retry_delays: t.Optional[t.List[int]] = None,
     ) -> str:
-        """Each round tries deep -> googletrans -> bing, once each, in that
-        fixed order. If a whole round fails (every engine errored), wait
-        the next delay in `retry_delays` and run another full round.
-        Only once every round is exhausted do we give up (the caller,
-        `translate()`, then splits the chapter in half and retries)."""
-        delays = retry_delays or [1, 3, 5, 10]
+        """Each round tries whichever engines are currently healthy, in
+        order. If a whole round fails (every healthy engine errored), wait
+        the next delay in `retry_delays` and run another round. Kept short
+        on purpose -- the caller (`translate()`) already retries again by
+        splitting the chapter in half, so we don't want two multi-round
+        retry loops stacked on top of each other."""
+        delays = retry_delays or [2, 5]
         target_code = Translator._normalize_language(target, fallback="en")
         source_code = Translator._normalize_language(source, fallback="auto")
 
@@ -460,7 +476,7 @@ class Translator:
     ) -> t.List[str]:
         """Same round-robin/backoff scheme as atranslate_with_retry, but
         for a batch of strings translated together."""
-        delays = retry_delays or [1, 3, 5, 10]
+        delays = retry_delays or [2, 5]
         target_code = Translator._normalize_language(target, fallback="en")
         source_code = Translator._normalize_language(source, fallback="auto")
 
