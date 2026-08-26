@@ -5,6 +5,7 @@ bs4==0.0.1
 chardet==4.0.0
 StringProgressBar==1.1.1
 googletrans==4.0.2
+deep-translator==1.11.4
 discord-ext-menus
 discord.py 
 parsel==1.8.1
@@ -19,7 +20,7 @@ readabilipy==0.2.0
 cloudscraper>=1.2.71
 requests~=2.31.0
 joblib~=1.2.0
-aiohttp~=3.8.3
+aiohttp>=3.9.0
 nltk~=3.8.1
 docx~=0.2.4
 epub2txt~=0.1.6
