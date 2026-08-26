@@ -1,4 +1,5 @@
 import asyncio
+import threading
 try:
     from asyncio import Timeout
 except ImportError:
@@ -34,11 +35,28 @@ class Translator:
 
     DEEP_TRANSLATOR_FALLBACK_AFTER = 2
 
+    # Which engine to try first. Starts as "deep" (matches old default
+    # behaviour) and is updated to whichever engine last succeeded, so
+    # future calls skip straight to the one that's currently working
+    # instead of re-trying a dead engine every time.
+    _preferred_engine = "deep"
+    _preferred_engine_lock = threading.Lock()
+
     def __init__(self, bot: Raizel, user: int, language: str) -> None:
         self.bot = bot
         self.user = user
         self.language = language
         self.order = {}
+
+    @classmethod
+    def _get_preferred_engine(cls) -> str:
+        return cls._preferred_engine
+
+    @classmethod
+    def _set_preferred_engine(cls, engine: str) -> None:
+        if cls._preferred_engine != engine:
+            with cls._preferred_engine_lock:
+                cls._preferred_engine = engine
 
     @staticmethod
     def _is_error_500_response(translated: t.List[str]) -> bool:
@@ -187,6 +205,36 @@ class Translator:
         return [str(getattr(item, "text", item)) for item in translated]
 
     @staticmethod
+    async def _translate_text_with_engine(
+            engine: str,
+            text: str,
+            target_code: str,
+            source_code: str,
+    ) -> str:
+        if engine == "deep":
+            return await Translator._translate_text_with_deep(
+                text=text, target_code=target_code, source_code=source_code,
+            )
+        return await Translator._translate_text_with_googletrans(
+            text=text, target_code=target_code, source_code=source_code,
+        )
+
+    @staticmethod
+    async def _translate_batch_with_engine(
+            engine: str,
+            chapter: t.List[str],
+            target_code: str,
+            source_code: str,
+    ) -> t.List[str]:
+        if engine == "deep":
+            return await Translator._translate_batch_with_deep(
+                chapter=chapter, target_code=target_code, source_code=source_code,
+            )
+        return await Translator._translate_batch_with_googletrans(
+            chapter=chapter, target_code=target_code, source_code=source_code,
+        )
+
+    @staticmethod
     async def adetect_with_retry(
             text: str,
             retry_delays: t.Optional[t.List[int]] = None,
@@ -236,30 +284,33 @@ class Translator:
         last_error: t.Optional[Exception] = None
         target_code = Translator._normalize_language(target, fallback="en")
         source_code = Translator._normalize_language(source, fallback="auto")
-        deep_failures = 0
+
+        # Try whichever engine last worked, first. Only fall back to the
+        # other engine after it's failed a few times in a row.
+        primary_engine = Translator._get_preferred_engine()
+        secondary_engine = "googletrans" if primary_engine == "deep" else "deep"
+        current_engine_failures = 0
 
         for attempt in range(len(delays) + 1):
-            use_deep = deep_failures < Translator.DEEP_TRANSLATOR_FALLBACK_AFTER
+            engine = (
+                primary_engine
+                if current_engine_failures < Translator.DEEP_TRANSLATOR_FALLBACK_AFTER
+                else secondary_engine
+            )
             try:
-                if use_deep:
-                    translated_text = await Translator._translate_text_with_deep(
-                        text=str(text),
-                        target_code=target_code,
-                        source_code=source_code,
-                    )
-                else:
-                    translated_text = await Translator._translate_text_with_googletrans(
-                        text=str(text),
-                        target_code=target_code,
-                        source_code=source_code,
-                    )
+                translated_text = await Translator._translate_text_with_engine(
+                    engine=engine,
+                    text=str(text),
+                    target_code=target_code,
+                    source_code=source_code,
+                )
 
                 cleaned = Translator._validate_and_clean_translations([translated_text])
+                Translator._set_preferred_engine(engine)
                 return cleaned[0]
             except Exception as e:
                 last_error = e
-                if use_deep:
-                    deep_failures += 1
+                current_engine_failures += 1
                 if attempt < len(delays):
                     await asyncio.sleep(delays[attempt])
 
@@ -291,29 +342,31 @@ class Translator:
         last_error: t.Optional[Exception] = None
         target_code = Translator._normalize_language(target, fallback="en")
         source_code = Translator._normalize_language(source, fallback="auto")
-        deep_failures = 0
+
+        primary_engine = Translator._get_preferred_engine()
+        secondary_engine = "googletrans" if primary_engine == "deep" else "deep"
+        current_engine_failures = 0
 
         for attempt in range(len(delays) + 1):
-            use_deep = deep_failures < Translator.DEEP_TRANSLATOR_FALLBACK_AFTER
+            engine = (
+                primary_engine
+                if current_engine_failures < Translator.DEEP_TRANSLATOR_FALLBACK_AFTER
+                else secondary_engine
+            )
             try:
-                if use_deep:
-                    translated_texts = await Translator._translate_batch_with_deep(
-                        chapter=chapter,
-                        target_code=target_code,
-                        source_code=source_code,
-                    )
-                else:
-                    translated_texts = await Translator._translate_batch_with_googletrans(
-                        chapter=chapter,
-                        target_code=target_code,
-                        source_code=source_code,
-                    )
+                translated_texts = await Translator._translate_batch_with_engine(
+                    engine=engine,
+                    chapter=chapter,
+                    target_code=target_code,
+                    source_code=source_code,
+                )
 
-                return Translator._validate_and_clean_translations(translated_texts)
+                cleaned = Translator._validate_and_clean_translations(translated_texts)
+                Translator._set_preferred_engine(engine)
+                return cleaned
             except Exception as e:
                 last_error = e
-                if use_deep:
-                    deep_failures += 1
+                current_engine_failures += 1
                 if attempt < len(delays):
                     await asyncio.sleep(delays[attempt])
 
