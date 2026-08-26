@@ -1,5 +1,6 @@
 import os
 import re
+import asyncio
 from datetime import datetime
 from typing import Any
 
@@ -107,8 +108,30 @@ class Library(Database):
 
     async def get_novel_by_name(self, name: str) -> list[Novel]:
         from utils.handler import FileHandler as fe
-        name = await fe.get_regex_from_name(name)
-        novels = await self.library.find({"title": re.compile(name, re.IGNORECASE)}).to_list(None)
+        if not name:
+            return None
+
+        normalized_name = re.sub(r"\s+", " ", str(name)).strip()
+        for subString in ["completed", "ongoing", "complete", "latest", "updated"]:
+            normalized_name = re.sub("(?i)" + re.escape(subString), "", normalized_name).strip()
+        if not normalized_name:
+            return None
+
+        name_regex = await fe.get_regex_from_name(normalized_name)
+        # Avoid regex patterns like ".*" for non-Latin titles, which can scan the whole collection.
+        is_overbroad = (not name_regex) or (name_regex.replace(".*", "") == "")
+        if is_overbroad:
+            escaped = re.escape(normalized_name)
+            query = {"title": {"$regex": f"^{escaped}$", "$options": "i"}}
+        else:
+            query = {"title": re.compile(name_regex, re.IGNORECASE)}
+
+        try:
+            async with asyncio.timeout(12):
+                novels = await self.library.find(query).limit(50).to_list(length=50)
+        except TimeoutError:
+            return None
+
         return [Novel(**novel) for novel in novels] if novels else None
 
     async def get_novel_by_category(self, category: str) -> list[Novel]:

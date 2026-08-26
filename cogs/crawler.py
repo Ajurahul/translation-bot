@@ -9,6 +9,7 @@ import time
 import traceback
 import typing
 import typing as t
+import unicodedata
 from urllib.parse import urljoin
 from urllib.parse import urlparse
 import cloudscraper
@@ -84,6 +85,12 @@ class Crawler(commands.Cog):
         self.chptitlecss = None
         self.urlcss = None
         self.bot = bot
+
+    @staticmethod
+    def _normalize_title_lookup(title_name: str) -> str:
+        lookup_title = str(title_name or "").split("__")[0]
+        lookup_title = unicodedata.normalize("NFKC", lookup_title)
+        return " ".join(lookup_title.split()).strip()
 
     @staticmethod
     def easy(nums: int, links: str, css: str, chptitleCSS: str, scraper) -> t.Tuple[int, str]:
@@ -841,7 +848,14 @@ class Crawler(commands.Cog):
                 title_name = title + "__" + title_name
                 title = str(title[:100])
         print("translated title : " + title_name)
-        novel_data = await self.bot.mongo.library.get_novel_by_name(title_name.split('__')[0])
+        lookup_title = self._normalize_title_lookup(title_name)
+        self.bot.logger.info(f"[crawl] Library lookup started | lookup_title={lookup_title!r}")
+        try:
+            async with asyncio.timeout(15):
+                novel_data = await self.bot.mongo.library.get_novel_by_name(lookup_title)
+        except TimeoutError:
+            self.bot.logger.warning(f"[crawl] Library lookup timeout | lookup_title={lookup_title!r}")
+            novel_data = None
         print("db scan done")
         library: int = await FileHandler.checkLibrary(novel_data, title_name, title, original_Language, ctx, self.bot)
         print(f"library : {library.__sizeof__()}")
@@ -1324,7 +1338,14 @@ class Crawler(commands.Cog):
                     pass
             for tag in ['/', '\\', '<', '>', "'", '"', ':', ";", '?', '|', '*', ';', '\r', '\n', '\t', '\\\\']:
                 title = title.replace(tag, '')
-        novel_data = await self.bot.mongo.library.get_novel_by_name(title_name.split('__')[0])
+        lookup_title = self._normalize_title_lookup(title_name)
+        self.bot.logger.info(f"[crawlnext] Library lookup started | lookup_title={lookup_title!r}")
+        try:
+            async with asyncio.timeout(15):
+                novel_data = await self.bot.mongo.library.get_novel_by_name(lookup_title)
+        except TimeoutError:
+            self.bot.logger.warning(f"[crawlnext] Library lookup timeout | lookup_title={lookup_title!r}")
+            novel_data = None
         # print(title_name)
         library_update: bool = False
         if title_name.strip().lower() == "001 - Read Novel Chapter 001 Online".lower():
