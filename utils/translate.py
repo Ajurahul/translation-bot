@@ -479,11 +479,15 @@ class Translator:
 
     @staticmethod
     def get_no_of_workers(no_tasks, size) -> int:
+        # More chunks = more to gain from concurrency, not less. The old
+        # version capped the biggest jobs at 3 workers (the slowest
+        # setting), which was backwards. Bump these up if you're not
+        # seeing rate-limit errors; dial them back down if you are.
         if size <= 700:
-            return 5
+            return 6
         elif size <= 1400:
-            return 4
+            return 5
         elif size <= 2000:
-            return 3
+            return 5
         else:
-            return min(no_tasks, 3) if no_tasks > 8 else 5
+            return min(max(no_tasks, 4), 6)

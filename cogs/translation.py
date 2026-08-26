@@ -554,7 +554,12 @@ class Translate(commands.Cog):
                 term_dict = terms("pokemon")
                 novel = term_raw(novel, term_dict)
                 await ctx.send("Added pokemon terms", delete_after=5)
-            liz = [novel[i: i + 1800] for i in range(0, len(novel), 1800)]
+            # Larger chunks = fewer network round trips to the translation
+            # engines, which is what actually dominates wall-clock time here.
+            # 4500 stays under Google Translate's free-endpoint request-size
+            # limit (~5000 chars) with a safety margin.
+            CHUNK_SIZE = 4500
+            liz = [novel[i: i + CHUNK_SIZE] for i in range(0, len(novel), CHUNK_SIZE)]
             insert = random.randint(1, 20)
             while True:
                 if insert < len(liz) - 3:
