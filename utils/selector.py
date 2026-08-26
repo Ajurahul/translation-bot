@@ -128,7 +128,8 @@ class CssSelector:
                 "www.fantinovels.com": "#htmlContent ::text",
             "zeustranslations.blogspot.com": "#readingBox ::text",
             "www.alicesw.com": "* ::text",
-                "bxg123.top": "#mycontent::text"
+                "bxg123.top": "#mycontent::text",
+                  "www.jpxs123.com": "#readContent_set > div.readDetail > div.read_chapterDetail ::text"
         }
             for domain, css_selector in domain_mappings.items():
                 if domain in link:
@@ -142,6 +143,7 @@ class CssSelector:
             "tongrenquan": [".infos>h1:first-child", ""],
             "qbtr": [".infos>h1:first-child", ""],
             "jpxs": [".infos>h1:first-child", ""],
+            "www.jpxs123.com":  [".infos>h1:first-child", ""],
             "ffxs8.com": ["body > div.detail.clearfix > div > div.info-desc > div.desc-detail > h1", ""],
             "txt520": ["title", ""],
             "ffxs": ["title", ""],
