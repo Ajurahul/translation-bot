@@ -1,5 +1,9 @@
 import asyncio
-from asyncio import Timeout
+try:
+    from asyncio import Timeout
+except ImportError:
+    from async_timeout import Timeout
+
 
 import concurrent.futures
 import re

@@ -19,6 +19,7 @@ mega.py @git+https://github.com/Ajurahul/mega.py@c3836facd07dba9b396982afd988ed2
 readabilipy==0.2.0
 cloudscraper>=1.2.71
 requests~=2.31.0
+async_timeout
 joblib~=1.2.0
 aiohttp>=3.9.0
 nltk~=3.8.1
