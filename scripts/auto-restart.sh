@@ -9,10 +9,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOG_DIR="$REPO_DIR/logs"
 LOG_FILE="$LOG_DIR/bot.txt"
+STARTUP_LOG="$LOG_DIR/bot_startup.log"
 HEALTH_FILE="$LOG_DIR/healthcheck.json"
 SESSION_NAME="ENTER"
 BOT_CMD="python3 main.py"
 HEALTH_MAX_AGE_SECONDS=180
+BOT_START_WAIT_SECONDS=10
 RUN_USER="${USER:-$(id -un 2>/dev/null || echo cron)}"
 
 PYTHON_BIN="$(command -v python3 2>/dev/null || true)"
@@ -72,14 +74,24 @@ restart_bot() {
     log "failed to create tmux session"
     exit 1
   fi
-  "$TMUX_BIN" detach -s "$SESSION_NAME" 2>/dev/null || true
-  "$TMUX_BIN" send-keys -t "$SESSION_NAME":0 "cd '$REPO_DIR';$PYTHON_BIN main.py" ENTER
 
-  sleep 2
+  # Redirect bot stdout+stderr to a dedicated startup log so crashes are visible.
+  local bot_launch_cmd="cd '$REPO_DIR' && $PYTHON_BIN main.py >> '$STARTUP_LOG' 2>&1"
+  "$TMUX_BIN" send-keys -t "$SESSION_NAME":0 "$bot_launch_cmd" ENTER
+
+  sleep "$BOT_START_WAIT_SECONDS"
   if pgrep -f "[p]ython3 main.py" >/dev/null 2>&1; then
     log "started bot"
   else
-    log "failed to start bot in tmux"
+    log "failed to start bot in tmux — last startup output below:"
+    # Append last 40 lines of startup log so the reason is visible in bot.txt
+    if [[ -f "$STARTUP_LOG" ]]; then
+      tail -n 40 "$STARTUP_LOG" | while IFS= read -r line; do
+        log "  STARTUP| $line"
+      done
+    else
+      log "  STARTUP| (no output captured — check tmux session '$SESSION_NAME')"
+    fi
     exit 1
   fi
 }
