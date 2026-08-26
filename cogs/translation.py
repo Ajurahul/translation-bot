@@ -558,7 +558,7 @@ class Translate(commands.Cog):
             # engines, which is what actually dominates wall-clock time here.
             # 4500 stays under Google Translate's free-endpoint request-size
             # limit (~5000 chars) with a safety margin.
-            CHUNK_SIZE = 4500
+            CHUNK_SIZE = 3500
             liz = [novel[i: i + CHUNK_SIZE] for i in range(0, len(novel), CHUNK_SIZE)]
             insert = random.randint(1, 20)
             while True:
