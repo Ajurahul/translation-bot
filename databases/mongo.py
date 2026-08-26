@@ -9,6 +9,13 @@ from pymongo import UpdateOne
 
 from databases.blocked import User
 from databases.data import Novel
+import asyncio
+import sys
+
+# If the system is running Python 3.10 or older, use the backport library
+if sys.version_info < (3, 11):
+    import async_timeout
+    asyncio.timeout = async_timeout.timeout
 
 
 class Database:

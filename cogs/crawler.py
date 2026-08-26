@@ -13,6 +13,13 @@ import unicodedata
 from urllib.parse import urljoin
 from urllib.parse import urlparse
 import cloudscraper
+import asyncio
+import sys
+
+# If the system is running Python 3.10 or older, use the backport library
+if sys.version_info < (3, 11):
+    import async_timeout
+    asyncio.timeout = async_timeout.timeout
 
 import aiofiles
 import discord
@@ -885,8 +892,7 @@ class Crawler(commands.Cog):
         lookup_title = self._normalize_title_lookup(title_name)
         self.bot.logger.info(f"[crawl] Library lookup started | lookup_title={lookup_title!r}")
         try:
-            async with asyncio.timeout(15):
-                novel_data = await self.bot.mongo.library.get_novel_by_name(lookup_title)
+            novel_data = await self.bot.mongo.library.get_novel_by_name(lookup_title)
         except TimeoutError:
             self.bot.logger.warning(f"[crawl] Library lookup timeout | lookup_title={lookup_title!r}")
             novel_data = None
@@ -1377,7 +1383,6 @@ class Crawler(commands.Cog):
         lookup_title = self._normalize_title_lookup(title_name)
         self.bot.logger.info(f"[crawlnext] Library lookup started | lookup_title={lookup_title!r}")
         try:
-            async with asyncio.timeout(15):
                 novel_data = await self.bot.mongo.library.get_novel_by_name(lookup_title)
         except TimeoutError:
             self.bot.logger.warning(f"[crawlnext] Library lookup timeout | lookup_title={lookup_title!r}")
