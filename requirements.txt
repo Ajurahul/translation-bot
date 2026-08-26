@@ -5,6 +5,7 @@ bs4==0.0.1
 chardet==4.0.0
 StringProgressBar==1.1.1
 googletrans==4.0.2
+deep-translator==1.11.4
 discord-ext-menus
 discord.py 
 parsel==1.8.1
