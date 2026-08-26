@@ -93,6 +93,26 @@ class Crawler(commands.Cog):
         return " ".join(lookup_title.split()).strip()
 
     @staticmethod
+    def _clean_title_text(text: str) -> str:
+        if text is None:
+            return ""
+        value = unicodedata.normalize("NFKC", str(text)).strip()
+        for src in ("latin-1", "cp1252"):
+            try:
+                repaired = value.encode(src).decode("utf-8")
+            except Exception:
+                continue
+            if repaired.count("�") < value.count("�"):
+                value = repaired
+                break
+        return value
+
+    @staticmethod
+    def _is_bad_title(text: str) -> bool:
+        value = str(text or "").strip()
+        return value == "" or value.lower() == "none" or value.count("�") >= 2
+
+    @staticmethod
     def easy(nums: int, links: str, css: str, chptitleCSS: str, scraper) -> t.Tuple[int, str]:
         response = None
         retry_attempts = 3
@@ -567,11 +587,12 @@ class Crawler(commands.Cog):
         elif res is None:
             if hasattr(self.bot, 'logger'):
                 self.bot.logger.info(f"[crawl] res is None for {link}")
+        raw_page_bytes = None
         if cloudscrape:
             scraper = cloudscraper.CloudScraper(delay=10)  # CloudScraper inherits from requests.Session
             response = await self.bot.loop.run_in_executor(None, lambda: scraper.get(link, timeout=10))
-            response.encoding = response.apparent_encoding
-            soup = BeautifulSoup(response.text, "html.parser", from_encoding=response.encoding)
+            raw_page_bytes = response.content
+            soup = BeautifulSoup(raw_page_bytes, "html.parser")
             soup1 = soup
             if str(response.status_code).startswith('4'):
                 return await ctx.send(
@@ -580,13 +601,14 @@ class Crawler(commands.Cog):
                 await ctx.send("> **Cloudflare is detected.. Turned on  the cloudscraper**", delete_after=10)
         else:
             data = await res.read()
-            soup = BeautifulSoup(data, "html.parser", from_encoding=res.get_encoding())
-            soup1 = BeautifulSoup(data, "lxml", from_encoding=res.get_encoding())
+            raw_page_bytes = data
+            soup = BeautifulSoup(data, "html.parser")
+            soup1 = BeautifulSoup(data, "lxml")
 
         self.titlecss = CssSelector.findchptitlecss(link)
         maintitleCSS = self.titlecss[0]
         try:
-            title_name = str(soup1.select(maintitleCSS)[0].text)
+            title_name = self._clean_title_text(str(soup1.select(maintitleCSS)[0].text))
             if title_name == "" or title_name is None:
                 raise Exception
         except Exception as e:
@@ -596,16 +618,16 @@ class Crawler(commands.Cog):
                 title_name = ""
                 scraper = cloudscraper.CloudScraper(delay=10)  # CloudScraper inherits from requests.Session
                 response = await self.bot.loop.run_in_executor(None, lambda: scraper.get(link, timeout=10))
-                response.encoding = response.apparent_encoding
+                raw_page_bytes = response.content
                 html = response.text
                 sel = parsel.Selector(html)
                 try:
-                    title_name = sel.css(maintitleCSS + " ::text").extract_first()
+                    title_name = self._clean_title_text(sel.css(maintitleCSS + " ::text").extract_first())
                 except Exception as e:
                     self.bot.logger.info(f"Error Occurred {e} {e.__traceback__}")
                     print("error at 200" + str(e))
                 if title_name.strip() == "" or title_name is None:
-                    title_name = sel.css("title ::text").extract_first()
+                    title_name = self._clean_title_text(sel.css("title ::text").extract_first())
                 # print(title)
 
             except Exception as ex:
@@ -730,7 +752,7 @@ class Crawler(commands.Cog):
                     utemp.append(urljoin(link, url))
                 urls = [u for u in utemp if host in u]
                 # print(urls)
-                title_name = sel.css(maintitleCSS + " ::text").extract_first()
+                title_name = self._clean_title_text(sel.css(maintitleCSS + " ::text").extract_first())
                 # print(urls)
             else:
                 if hasattr(self.bot, 'logger'):
@@ -738,22 +760,34 @@ class Crawler(commands.Cog):
         scraper = cloudscraper.CloudScraper(delay=10)
         if urls == [] or len(urls) < 30:
             response = await self.bot.loop.run_in_executor(None, lambda: scraper.get(link))
-            soup = BeautifulSoup(response.text, "html.parser", from_encoding=response.encoding)
+            raw_page_bytes = response.content
+            soup = BeautifulSoup(raw_page_bytes, "html.parser")
             urls = await find_urls(soup, link, name)
             if len(urls) > 30:
                 cloudscrape = True
                 await ctx.send("Cloudscraper is turned on as cloudflare is detected", delete_after=5)
             try:
-                title_name = str(soup.select(maintitleCSS)[0].text)
+                title_name = self._clean_title_text(str(soup.select(maintitleCSS)[0].text))
             except:
                 title_name = "None"
         if title_name == "" or title_name == "None" or title_name is None:
             try:
-                title_name = str(soup.select("h1")[0].text)
+                title_name = self._clean_title_text(str(soup.select("h1")[0].text))
             except:
                 title_name = "None"
         if title_name.strip() == "" or title_name == "None" or title_name is None:
-            title_name = str(soup.select("title")[0].text)
+            title_name = self._clean_title_text(str(soup.select("title")[0].text))
+        # If title still looks corrupted, reparse from raw bytes without forced encoding.
+        if self._is_bad_title(title_name) and raw_page_bytes:
+            try:
+                raw_soup = BeautifulSoup(raw_page_bytes, "html.parser")
+                raw_match = raw_soup.select_one(maintitleCSS)
+                if raw_match is not None:
+                    title_name = self._clean_title_text(raw_match.get_text(" ", strip=True))
+                if self._is_bad_title(title_name) and raw_soup.title is not None:
+                    title_name = self._clean_title_text(raw_soup.title.get_text(" ", strip=True))
+            except Exception:
+                pass
         if title_name is None or str(title_name).strip() == "":
             title_name = await FileHandler.get_title(soup)
         if title_name is None or str(title_name).strip() == "":
@@ -1295,16 +1329,18 @@ class Crawler(commands.Cog):
                 # print(href)
                 path = self.xpath_soup(href[0])
 
-        title = sel.css(f'{title_css} ::text').extract_first()
+        title = self._clean_title_text(sel.css(f'{title_css} ::text').extract_first())
         if title is None or str(title).strip() == "":
             print(f"title empty {title}")
-            title = sel.css(f'title ::text').extract_first()
+            title = self._clean_title_text(sel.css(f'title ::text').extract_first())
         if title is None or str(title).strip() == "":
             title = await FileHandler.get_title(soup)
+            title = self._clean_title_text(title)
         if title is None or str(title).strip() == "":
             title = firstchplink
         if (title is None or title == "") and headless:
             title = driver.title
+        title = self._clean_title_text(title)
         chp_count = 1
         scraper = None
         # print(title)

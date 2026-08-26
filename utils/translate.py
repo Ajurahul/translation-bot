@@ -6,6 +6,7 @@ import re
 import time
 import typing as t
 
+from deep_translator import GoogleTranslator as DeepGoogleTranslator
 from googletrans import Translator as GoogleTransClient
 
 from core.bot import Raizel
@@ -13,6 +14,22 @@ from languages import languages
 
 
 class Translator:
+    GOOGLETRANS_SERVICE_URLS = [
+        "translate.google.com",
+        "translate.google.co.in",
+        "translate.google.co.kr",
+        "translate.google.co.uk",
+        "translate.google.ca",
+        "translate.google.com.au",
+        "translate.google.de",
+        "translate.google.fr",
+        "translate.google.es",
+        "translate.google.it",
+        "translate.google.co.jp",
+    ]
+
+    DEEP_TRANSLATOR_FALLBACK_AFTER = 2
+
     def __init__(self, bot: Raizel, user: int, language: str) -> None:
         self.bot = bot
         self.user = user
@@ -88,6 +105,84 @@ class Translator:
             return future.result()
 
     @staticmethod
+    def _validate_and_clean_translations(translated: t.List[str]) -> t.List[str]:
+        if Translator._is_error_500_response(translated):
+            raise RuntimeError("translation returned Error 500 response body")
+
+        cleaned = [Translator._filter_error_text(str(text)) for text in translated]
+
+        # Re-check after filtering so partial error payloads are never returned.
+        if Translator._is_error_500_response(cleaned):
+            raise RuntimeError("translation returned Error 500 response body")
+
+        return cleaned
+
+    @staticmethod
+    async def _translate_text_with_deep(
+            text: str,
+            target_code: str,
+            source_code: str,
+    ) -> str:
+        def _work() -> str:
+            translator = DeepGoogleTranslator(source=source_code, target=target_code)
+            return str(translator.translate(str(text)))
+
+        return await asyncio.to_thread(_work)
+
+    @staticmethod
+    async def _translate_batch_with_deep(
+            chapter: t.List[str],
+            target_code: str,
+            source_code: str,
+    ) -> t.List[str]:
+        def _work() -> t.List[str]:
+            translator = DeepGoogleTranslator(source=source_code, target=target_code)
+            if hasattr(translator, "translate_batch"):
+                translated = translator.translate_batch(chapter)
+                return [str(item) for item in translated]
+            return [str(translator.translate(str(item))) for item in chapter]
+
+        return await asyncio.to_thread(_work)
+
+    @staticmethod
+    async def _translate_text_with_googletrans(
+            text: str,
+            target_code: str,
+            source_code: str,
+    ) -> str:
+        async with GoogleTransClient(
+                timeout=Timeout(15.0),
+                raise_exception=True,
+                service_urls=Translator.GOOGLETRANS_SERVICE_URLS,
+        ) as translator:
+            translated = await translator.translate(
+                str(text),
+                dest=target_code,
+                src=source_code,
+            )
+        return str(getattr(translated, "text", translated))
+
+    @staticmethod
+    async def _translate_batch_with_googletrans(
+            chapter: t.List[str],
+            target_code: str,
+            source_code: str,
+    ) -> t.List[str]:
+        async with GoogleTransClient(
+                timeout=Timeout(15.0),
+                raise_exception=True,
+                service_urls=Translator.GOOGLETRANS_SERVICE_URLS,
+        ) as translator:
+            translated = await translator.translate(
+                chapter,
+                dest=target_code,
+                src=source_code,
+            )
+        if not isinstance(translated, list):
+            translated = [translated]
+        return [str(getattr(item, "text", item)) for item in translated]
+
+    @staticmethod
     async def adetect_with_retry(
             text: str,
             retry_delays: t.Optional[t.List[int]] = None,
@@ -100,19 +195,11 @@ class Translator:
 
         for attempt in range(len(delays) + 1):
             try:
-                async with GoogleTransClient(timeout=Timeout(15.0), raise_exception=True, service_urls=[
-        "translate.google.com",
-        "translate.google.co.in",
-        "translate.google.co.kr",
-        "translate.google.co.uk",
-        "translate.google.ca",
-        "translate.google.com.au",
-        "translate.google.de",
-        "translate.google.fr",
-        "translate.google.es",
-        "translate.google.it",
-        "translate.google.co.jp",
-    ]) as translator:
+                async with GoogleTransClient(
+                        timeout=Timeout(15.0),
+                        raise_exception=True,
+                        service_urls=Translator.GOOGLETRANS_SERVICE_URLS,
+                ) as translator:
                     result = await translator.detect(sample)
                 lang = str(getattr(result, "lang", "NA") or "NA").lower()
                 return lang
@@ -145,33 +232,30 @@ class Translator:
         last_error: t.Optional[Exception] = None
         target_code = Translator._normalize_language(target, fallback="en")
         source_code = Translator._normalize_language(source, fallback="auto")
+        deep_failures = 0
 
         for attempt in range(len(delays) + 1):
+            use_deep = deep_failures < Translator.DEEP_TRANSLATOR_FALLBACK_AFTER
             try:
-                async with GoogleTransClient(timeout=Timeout(15.0), raise_exception=True, service_urls=[
-        "translate.google.com",
-        "translate.google.co.in",
-        "translate.google.co.kr",
-        "translate.google.co.uk",
-        "translate.google.ca",
-        "translate.google.com.au",
-        "translate.google.de",
-        "translate.google.fr",
-        "translate.google.es",
-        "translate.google.it",
-        "translate.google.co.jp",
-    ]) as translator:
-                    translated = await translator.translate(
-                        str(text),
-                        dest=target_code,
-                        src=source_code,
+                if use_deep:
+                    translated_text = await Translator._translate_text_with_deep(
+                        text=str(text),
+                        target_code=target_code,
+                        source_code=source_code,
                     )
-                translated_text = str(getattr(translated, "text", translated))
-                if Translator._is_error_500_response([translated_text]):
-                    raise RuntimeError("translation returned Error 500 response body")
-                return Translator._filter_error_text(translated_text)
+                else:
+                    translated_text = await Translator._translate_text_with_googletrans(
+                        text=str(text),
+                        target_code=target_code,
+                        source_code=source_code,
+                    )
+
+                cleaned = Translator._validate_and_clean_translations([translated_text])
+                return cleaned[0]
             except Exception as e:
                 last_error = e
+                if use_deep:
+                    deep_failures += 1
                 if attempt < len(delays):
                     await asyncio.sleep(delays[attempt])
 
@@ -203,35 +287,29 @@ class Translator:
         last_error: t.Optional[Exception] = None
         target_code = Translator._normalize_language(target, fallback="en")
         source_code = Translator._normalize_language(source, fallback="auto")
+        deep_failures = 0
 
         for attempt in range(len(delays) + 1):
+            use_deep = deep_failures < Translator.DEEP_TRANSLATOR_FALLBACK_AFTER
             try:
-                async with GoogleTransClient(timeout=Timeout(15.0), raise_exception=True, service_urls=[
-        "translate.google.com",
-        "translate.google.co.in",
-        "translate.google.co.kr",
-        "translate.google.co.uk",
-        "translate.google.ca",
-        "translate.google.com.au",
-        "translate.google.de",
-        "translate.google.fr",
-        "translate.google.es",
-        "translate.google.it",
-        "translate.google.co.jp",
-    ]) as translator:
-                    translated = await translator.translate(
-                        chapter,
-                        dest=target_code,
-                        src=source_code,
+                if use_deep:
+                    translated_texts = await Translator._translate_batch_with_deep(
+                        chapter=chapter,
+                        target_code=target_code,
+                        source_code=source_code,
                     )
-                if not isinstance(translated, list):
-                    translated = [translated]
-                translated_texts = [str(getattr(item, "text", item)) for item in translated]
-                if Translator._is_error_500_response(translated_texts):
-                    raise RuntimeError("translation returned Error 500 response body")
-                return [Translator._filter_error_text(text) for text in translated_texts]
+                else:
+                    translated_texts = await Translator._translate_batch_with_googletrans(
+                        chapter=chapter,
+                        target_code=target_code,
+                        source_code=source_code,
+                    )
+
+                return Translator._validate_and_clean_translations(translated_texts)
             except Exception as e:
                 last_error = e
+                if use_deep:
+                    deep_failures += 1
                 if attempt < len(delays):
                     await asyncio.sleep(delays[attempt])
 
