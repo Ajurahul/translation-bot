@@ -12,7 +12,12 @@ from databases.data import Novel
 
 class Database:
     def __init__(self) -> None:
-        self.db = motor_asyncio.AsyncIOMotorClient(os.getenv("DATABASE"))
+        self.db = motor_asyncio.AsyncIOMotorClient(os.getenv("DATABASE"),
+                                                   serverSelectionTimeoutMS=5000,
+                                                   connectTimeoutMS=5000,
+                                                   socketTimeoutMS=10000,
+                                                   maxPoolSize=50,
+                                                   )
 
 
 class Library(Database):
