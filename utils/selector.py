@@ -127,7 +127,8 @@ class CssSelector:
                 "m.shuhaige": "#chapter > div.content ::text",
                 "www.fantinovels.com": "#htmlContent ::text",
             "zeustranslations.blogspot.com": "#readingBox ::text",
-            "www.alicesw.com": "* ::text"
+            "www.alicesw.com": "* ::text",
+                "bxg123.top": "#mycontent::text"
         }
             for domain, css_selector in domain_mappings.items():
                 if domain in link:
@@ -190,7 +191,8 @@ class CssSelector:
             "m.38xs.com": ["#read > div.main > div.detail > p.name > strong > font > font", "#chapter > h1 > font > font ::text"],
             "requiemtls.com": ["div.infox > h1","div.epheader ::text"],
             "requimtl.com": ["head > title","h2 ::text"],  #body > div.min-h-screen...
-            "www.alicesw.com": ["title", "title ::text"]
+            "www.alicesw.com": ["title", "title ::text"],
+            "bxg123.top": ["body > div.detail.clearfix > div > div.info-right > div.desc > h1 > font > font", "title ::text"]
         }
         for domain, ret_array in domain_mappings.items():
             if domain in link:
