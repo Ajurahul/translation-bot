@@ -840,6 +840,7 @@ class Crawler(commands.Cog):
                     pass
                 title_name = title + "__" + title_name
                 title = str(title[:100])
+        print("translated title : " + title)
         novel_data = await self.bot.mongo.library.get_novel_by_name(title_name.split('__')[0])
         print("db scan done")
         library: int = await FileHandler.checkLibrary(novel_data, title_name, title, original_Language, ctx, self.bot)
