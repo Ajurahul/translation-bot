@@ -1,4 +1,6 @@
 import asyncio
+from asyncio import Timeout
+
 import concurrent.futures
 import re
 import time
@@ -98,7 +100,19 @@ class Translator:
 
         for attempt in range(len(delays) + 1):
             try:
-                async with GoogleTransClient() as translator:
+                async with GoogleTransClient(timeout=Timeout(15.0), raise_exception=True, service_urls=[
+        "translate.google.com",
+        "translate.google.co.in",
+        "translate.google.co.kr",
+        "translate.google.co.uk",
+        "translate.google.ca",
+        "translate.google.com.au",
+        "translate.google.de",
+        "translate.google.fr",
+        "translate.google.es",
+        "translate.google.it",
+        "translate.google.co.jp",
+    ]) as translator:
                     result = await translator.detect(sample)
                 lang = str(getattr(result, "lang", "NA") or "NA").lower()
                 return lang
@@ -134,7 +148,19 @@ class Translator:
 
         for attempt in range(len(delays) + 1):
             try:
-                async with GoogleTransClient() as translator:
+                async with GoogleTransClient(timeout=Timeout(15.0), raise_exception=True, service_urls=[
+        "translate.google.com",
+        "translate.google.co.in",
+        "translate.google.co.kr",
+        "translate.google.co.uk",
+        "translate.google.ca",
+        "translate.google.com.au",
+        "translate.google.de",
+        "translate.google.fr",
+        "translate.google.es",
+        "translate.google.it",
+        "translate.google.co.jp",
+    ]) as translator:
                     translated = await translator.translate(
                         str(text),
                         dest=target_code,
@@ -180,7 +206,19 @@ class Translator:
 
         for attempt in range(len(delays) + 1):
             try:
-                async with GoogleTransClient() as translator:
+                async with GoogleTransClient(timeout=Timeout(15.0), raise_exception=True, service_urls=[
+        "translate.google.com",
+        "translate.google.co.in",
+        "translate.google.co.kr",
+        "translate.google.co.uk",
+        "translate.google.ca",
+        "translate.google.com.au",
+        "translate.google.de",
+        "translate.google.fr",
+        "translate.google.es",
+        "translate.google.it",
+        "translate.google.co.jp",
+    ]) as translator:
                     translated = await translator.translate(
                         chapter,
                         dest=target_code,
