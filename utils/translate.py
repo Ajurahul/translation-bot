@@ -40,6 +40,9 @@ class Translator:
         "translate.google.co.jp",
     ]
 
+    # Fixed try-order per round: deep translator first, then googletrans,
+    # then bing (if the optional dependency is installed). Every round
+    # tries each of these exactly once before giving up on that round.
     ENGINE_SEQUENCE = ["deep", "googletrans"] + (["bing"] if _BING_AVAILABLE else [])
 
     # deep_translator/googletrans use Google's own language codes (from
@@ -72,6 +75,12 @@ class Translator:
     _engine_cooldown_until: t.Dict[str, float] = {}
     _engine_lock = threading.Lock()
 
+    # Whichever engine most recently succeeded gets tried first on the next
+    # job -- e.g. if deep failed but googletrans worked last time, the next
+    # job starts with googletrans (and tries deep after). Starts as None,
+    # meaning "use ENGINE_SEQUENCE's default order" (deep first).
+    _preferred_engine: t.Optional[str] = None
+
     def __init__(self, bot: Raizel, user: int, language: str) -> None:
         self.bot = bot
         self.user = user
@@ -91,20 +100,33 @@ class Translator:
                 cls._engine_cooldown_until[engine] = time.time() + cls.ENGINE_COOLDOWN_SECONDS
                 count = 0
             cls._engine_failure_counts[engine] = count
+            # This engine just failed -- if it was the preferred one, clear
+            # that so the next job doesn't lead with a known-bad engine.
+            if cls._preferred_engine == engine:
+                cls._preferred_engine = None
 
     @classmethod
     def _note_engine_success(cls, engine: str) -> None:
         with cls._engine_lock:
             cls._engine_failure_counts[engine] = 0
             cls._engine_cooldown_until.pop(engine, None)
+            cls._preferred_engine = engine
 
     @classmethod
     def _get_engine_order(cls) -> t.List[str]:
-        """deep -> googletrans -> bing, with anything currently cooling
-        down pushed to the back of the round (never dropped entirely --
-        if every engine is cooling down we still need something to try)."""
-        healthy = [e for e in cls.ENGINE_SEQUENCE if not cls._is_engine_cooling_down(e)]
-        cooling = [e for e in cls.ENGINE_SEQUENCE if cls._is_engine_cooling_down(e)]
+        """Whichever engine last succeeded goes first, then the rest of
+        ENGINE_SEQUENCE (deep -> googletrans -> bing) in their normal
+        order. Within that, anything currently cooling down is pushed to
+        the back (never dropped entirely -- if every engine is cooling
+        down we still need something to try)."""
+        preferred = cls._preferred_engine
+        if preferred in cls.ENGINE_SEQUENCE:
+            order = [preferred] + [e for e in cls.ENGINE_SEQUENCE if e != preferred]
+        else:
+            order = list(cls.ENGINE_SEQUENCE)
+
+        healthy = [e for e in order if not cls._is_engine_cooling_down(e)]
+        cooling = [e for e in order if cls._is_engine_cooling_down(e)]
         return healthy + cooling
 
     @staticmethod
