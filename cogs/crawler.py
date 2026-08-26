@@ -821,6 +821,7 @@ class Crawler(commands.Cog):
             title_name = title_name.replace(tag, '')
         title_name = title_name.replace('_', ' ')
         original_Language = await FileHandler.find_language(text="title_name " + title_name, link=link)
+        print("language detected : " + original_Language)
         if original_Language != "english" and translate_to is None and add_terms is None:
             translate_to = "eng_auto"
         if title_name == "" or title_name == "None" or title_name is None:
@@ -840,6 +841,7 @@ class Crawler(commands.Cog):
                 title_name = title + "__" + title_name
                 title = str(title[:100])
         novel_data = await self.bot.mongo.library.get_novel_by_name(title_name.split('__')[0])
+        print("db scan done")
         library: int = await FileHandler.checkLibrary(novel_data, title_name, title, original_Language, ctx, self.bot)
         print(f"library : {library.__sizeof__()}")
         if library == 0:
