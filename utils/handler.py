@@ -22,6 +22,9 @@ from readabilipy import simple_json_from_html_string
 from textblob import TextBlob
 from bs4 import BeautifulSoup
 
+from utils.parsing import make_soup
+from utils import extraction
+
 from cogs.library import Library
 from core.bot import Raizel
 from core.views.linkview import LinkView
@@ -370,8 +373,12 @@ class FileHandler:
         for meta in soup.find_all("meta"):
             if meta.get("name", "") in aliases:
                 description += meta.get("content", "")
-        if description is None:
-            description = ""
+        if description is None or description.strip() == "":
+            # Fallback: og:description/meta description (broader alias
+            # set), JSON-LD description, or the highest-scoring visible
+            # synopsis-like block - see utils/extraction.py.
+            result = extraction.extract_description(soup)
+            description = result.value if result else ""
         return description
 
     @staticmethod
@@ -457,12 +464,19 @@ class FileHandler:
 
     @staticmethod
     async def find_toc_next(soup: BeautifulSoup, link: str = None):
+        # Legacy exact-match list kept first (cheap, and matches
+        # site-specific pagination labels this project has already tuned
+        # for) - only falls through to the broader multilingual/rel="next"
+        # heuristic in utils.extraction when nothing here matches.
         selectors = ("下一页", "next page", ">", "next", "»»", "»", "下一节", "后一页")  # 下一页  "下一章"- next chp 下一页
         for a in soup.find_all("a"):
             # print(a.get('href'))
             if any(selector == a.get_text().lower() for selector in selectors):
                 # print("toc true")
                 return urljoin(link, a.get('href'))
+        result = extraction.find_next_link(soup, base_url=link)
+        if result:
+            return result.value
         print("tocfalse")
         return None
 
@@ -477,6 +491,13 @@ class FileHandler:
             if any(selector == a.get_text().lower().strip() for selector in selectors):
                 # print("next true")
                 return urljoin(link, a.get('href'))
+        # Fallback: <link rel="next">, <a rel="next">, and a broader
+        # multilingual label/class scoring pass (Korean, Chinese, Japanese,
+        # more English variants) - see utils/extraction.py. Only used when
+        # the exact-match list above finds nothing.
+        result = extraction.find_next_link(soup, base_url=link)
+        if result:
+            return result.value
         return None
 
     @staticmethod
@@ -502,6 +523,12 @@ class FileHandler:
                     return title.get_text().strip()
             except Exception:
                 pass
+        # Fallback: og:title/twitter:title, JSON-LD headline/name, or the
+        # <title> tag with a trailing site-name suffix stripped - see
+        # utils/extraction.py. Only reached if no h1..h6 matched above.
+        result = extraction.extract_title(soup)
+        if result:
+            return result.value
         return ""
 
     @staticmethod
@@ -604,7 +631,7 @@ class FileHandler:
         scraper = cloudscraper.create_scraper(delay=10)
         if "69shu" in link and "txt" not in link:
             link = urljoin(link, parsel.Selector(scraper.get(link).text).css("div.titxt ::attr(href)").extract_first())
-            soup = BeautifulSoup(scraper.get(link).text, "html.parser")
+            soup = make_soup(scraper.get(link).text)
         url, suffix, midfix, prefix = await FileHandler.tokenize(link)
         compound = (
             "readwn",

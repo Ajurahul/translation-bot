@@ -27,10 +27,8 @@ import parsel
 import requests
 # from StringProgressBar import progressBar
 
-# import undetected_chromedriver as uc
 from selenium import webdriver
 
-from bs4 import BeautifulSoup
 from discord import app_commands
 from discord.ext import commands
 from readabilipy import simple_json_from_html_string
@@ -45,6 +43,12 @@ from utils.hints import Hints
 from utils.progress import Progress
 from utils.selector import CssSelector
 from utils.translate import Translator
+from utils import net as net_utils
+from utils import extraction
+from utils.parsing import make_soup
+from utils.urlnorm import VisitedTracker
+from utils.browser import build_chrome_options, BrowserStartupError
+from selenium.common.exceptions import SessionNotCreatedException, WebDriverException
 
 headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36"
@@ -70,20 +74,34 @@ async def find_urls(soup, link, name):
 
 
 def get_driver():
-    options = webdriver.ChromeOptions()
-    options.add_argument("--headless")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920x1080")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
+    """Start a headless Chrome instance for Selenium fallback use.
 
-    # Add a user-agent string
-    options.add_argument(
-        "User-Agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36")
-
-    driver = webdriver.Chrome(options=options)
-    return driver
+    Kept as a plain function (same call signature as before -
+    ``driver = get_driver()``) so every existing call site keeps working
+    unchanged. Internally this now: uses the modern ``--headless=new``
+    flag set via utils.browser, sets bounded page-load/script timeouts,
+    and retries a couple of times on SessionNotCreatedException /
+    WebDriverException (the classic "chromedriver doesn't match the
+    installed Chrome/Chromium version" startup failure) before raising a
+    clear error instead of crashing the whole command with a raw
+    Selenium traceback.
+    """
+    last_exc = None
+    for attempt in range(1, 3):
+        try:
+            driver = webdriver.Chrome(options=build_chrome_options())
+            driver.set_page_load_timeout(30)
+            driver.set_script_timeout(15)
+            return driver
+        except SessionNotCreatedException as e:
+            last_exc = e
+            print(f"[get_driver] SessionNotCreatedException on attempt {attempt}/2: {e}. "
+                  f"This usually means chromedriver's version doesn't match the installed "
+                  f"Chrome/Chromium version on this host.")
+        except WebDriverException as e:
+            last_exc = e
+            print(f"[get_driver] WebDriverException on attempt {attempt}/2: {e}")
+    raise BrowserStartupError(f"Could not start headless Chrome after 2 attempts: {last_exc}") from last_exc
 
 
 class Crawler(commands.Cog):
@@ -121,22 +139,14 @@ class Crawler(commands.Cog):
 
     @staticmethod
     def easy(nums: int, links: str, css: str, chptitleCSS: str, scraper) -> t.Tuple[int, str]:
-        response = None
-        retry_attempts = 3
-        delay = 3
-        for attempt in range(retry_attempts):
-            try:
-                if scraper is not None:
-                    response = scraper.get(links, headers=FileHandler.get_handler(), timeout=20)
-                else:
-                    response = requests.get(links, headers=FileHandler.get_handler(), timeout=20)
-                if response is not None:
-                    break
-            except Exception as e:
-                print(f"[easy] Network error on attempt {attempt+1} for {links}: {e}")
-                time.sleep(delay)
-                delay = min(delay * 2, 10)
-        else:
+        # Bounded, backed-off retry around a single GET, shared by every
+        # worker thread in direct()'s ThreadPoolExecutor. Centralized here
+        # instead of hand-rolled per call site (see utils/net.py).
+        response = net_utils.fetch_with_retries(
+            links, scraper=scraper, headers=FileHandler.get_handler(), timeout=20,
+            retries=3, base_delay=3.0,
+        )
+        if response is None:
             print(f"[easy] All retry attempts failed for {links}")
             return nums, f"\ncouldn't get connection to {links}\n"
         if str(response.status_code).startswith('4'):
@@ -158,7 +168,7 @@ class Crawler(commands.Cog):
         if full == "":
             html = response.text
             # if "69shu" in links:
-            #     soup = BeautifulSoup(response.text, "html.parser", from_encoding=response.encoding)
+            #     soup = make_soup(response.text, from_encoding=response.encoding)
             #     sel = parsel.Selector(str(soup))
             # else:
             sel = parsel.Selector(html)
@@ -251,29 +261,23 @@ class Crawler(commands.Cog):
                         WebDriverWait(driver, 10).until(
                             lambda d: d.execute_script('return document.readyState') == 'complete'
                         )
-                    soup = BeautifulSoup(driver.page_source, "html.parser")
+                    soup = make_soup(driver.page_source)
                 elif scraper is not None:
-                    # Retry logic for scraper.get
-                    retry_attempts = 3
-                    delay = 2
-                    for attempt in range(retry_attempts):
-                        try:
-                            response = await self.bot.loop.run_in_executor(None, self.scrape, scraper, links)
-                            if response is not None:
-                                break
-                        except Exception as e:
-                            if hasattr(self.bot, 'logger'):
-                                self.bot.logger.info(f"[getcontent] scraper.get error on attempt {attempt+1} for {links}: {e}")
-                            await asyncio.sleep(delay)
-                            delay = min(delay * 2, 10)
+                    response = await self.bot.loop.run_in_executor(
+                        None,
+                        lambda: net_utils.fetch_with_retries(
+                            links, scraper=scraper, headers=FileHandler.get_handler(),
+                            timeout=20, retries=3, base_delay=2.0,
+                        ),
+                    )
                     if response is not None:
                         response.encoding = response.apparent_encoding
-                        soup = BeautifulSoup(response.text, "html.parser", from_encoding=response.encoding)
+                        soup = make_soup(response.text, from_encoding=response.encoding)
                         if str(response.status_code).startswith('4'):
                             if _i >= 4:
                                 if hasattr(self.bot, 'logger'):
                                     self.bot.logger.info(f"[getcontent] 4xx error for {links}")
-                                return ['error', links]
+                                return ['error', links, driver]
                             else:
                                 await asyncio.sleep(2)
                                 continue
@@ -281,7 +285,7 @@ class Crawler(commands.Cog):
                         if hasattr(self.bot, 'logger'):
                             self.bot.logger.info(f"[getcontent] response is None for {links}")
                         if _i >= 4:
-                            return ['error', links]
+                            return ['error', links, driver]
                         else:
                             await asyncio.sleep(2)
                             continue
@@ -300,13 +304,13 @@ class Crawler(commands.Cog):
                             await asyncio.sleep(delay)
                             delay = min(delay * 2, 10)
                     if response is not None:
-                        soup = BeautifulSoup(await response.read(), "html.parser", from_encoding=response.get_encoding())
+                        soup = make_soup(await response.read(), from_encoding=response.get_encoding())
                         if response.status == 404:
                             if _i >= 4:
                                 await asyncio.sleep(2)
                                 if hasattr(self.bot, 'logger'):
                                     self.bot.logger.info(f"[getcontent] 404 error for {links}")
-                                return ['error', links]
+                                return ['error', links, driver]
                             else:
                                 continue
                     else:
@@ -314,7 +318,7 @@ class Crawler(commands.Cog):
                             self.bot.logger.info(f"[getcontent] response is None for {links}")
                         if _i >= 4:
                             await asyncio.sleep(3)
-                            return ['error', links]
+                            return ['error', links, driver]
                         else:
                             continue
             except Exception as e:
@@ -322,7 +326,7 @@ class Crawler(commands.Cog):
                     self.bot.logger.info(f"[getcontent] Exception: {e}")
                 if _i >= 4:
                     await asyncio.sleep(3)
-                    return ['error', links]
+                    return ['error', links, driver]
                 else:
                     continue
 
@@ -331,7 +335,17 @@ class Crawler(commands.Cog):
         if soup is None:
             if hasattr(self.bot, 'logger'):
                 self.bot.logger.info(f"[getcontent] soup is None for {links}")
-            return ['error', links]
+            return ['error', links, driver]
+        # Conservative safety net: only trips on strong, specific markers
+        # (Cloudflare/bot-challenge pages, login-only pages) - see
+        # utils/extraction.py. Avoids translating a challenge/error page
+        # as if it were real chapter content.
+        challenge_reason = extraction.looks_like_challenge_or_empty(soup)
+        if challenge_reason:
+            if hasattr(self.bot, 'logger'):
+                self.bot.logger.warning(f"[getcontent] Page for {links} looks like a challenge/block/empty "
+                                        f"page, not chapter content: {challenge_reason}")
+            return ['error', links, driver]
         sel = parsel.Selector(str(soup))
         article = await self.bot.loop.run_in_executor(None, simple_json_from_html_string, str(soup))
         chpTitle = article['title']
@@ -362,7 +376,7 @@ class Crawler(commands.Cog):
 
         full_chp = full_chp + "\n--------------------xxxx--------------------\n\n"
 
-        return [full_chp, next_href]
+        return [full_chp, next_href, driver]
 
     def xpath_soup(self, element):
         components = []
@@ -541,6 +555,13 @@ class Crawler(commands.Cog):
                 f"> Bot is scheduled to restart within 60 sec or after all current tasks are completed.. Please try after bot is restarted")
         self.bot.logger.info(f"[crawl] Command started | user={ctx.author} ({ctx.author.id}) | link={link} | translate_to={translate_to} | reverse={reverse} | max_chapters={max_chapters}")
         cloudscrape: bool = False
+        # One reusable, pooled session for this /crawl invocation - reused
+        # for every request it makes instead of a fresh session/scraper
+        # per request. Escalates to cloudscraper for up to 5 bounded,
+        # backed-off attempts on a Cloudflare-style block before giving up
+        # and reporting a clear "couldn't access this site" error instead
+        # of hanging or crashing.
+        net_session = net_utils.CrawlSession(allow_cloudscrape=True)
         if link is None:
             return await ctx.reply(f"> **❌Enter a link for crawling.**")
         allowed = self.bot.allowed
@@ -596,21 +617,29 @@ class Crawler(commands.Cog):
                 self.bot.logger.info(f"[crawl] res is None for {link}")
         raw_page_bytes = None
         if cloudscrape:
-            scraper = cloudscraper.CloudScraper(delay=10)  # CloudScraper inherits from requests.Session
-            response = await self.bot.loop.run_in_executor(None, lambda: scraper.get(link, timeout=10))
+            result = await self.bot.loop.run_in_executor(None, net_session.get, link)
+            if result.blocked or result.response is None:
+                self.bot.logger.warning(f"[crawl] Site unreachable after bounded cloudscraper attempts | link={link} | error={result.error}")
+                await msg.delete()
+                net_session.close()
+                return await ctx.send(
+                    f"> **❌Couldn't access this site (looks Cloudflare-protected and didn't clear after "
+                    f"{net_utils.CrawlSession.MAX_CLOUD_ATTEMPTS} attempts). Please try again later, or try "
+                    f"crawlnext with the headless browser option.**")
+            response = result.response
             raw_page_bytes = response.content
-            soup = BeautifulSoup(raw_page_bytes, "html.parser")
+            soup = make_soup(raw_page_bytes)
             soup1 = soup
             if str(response.status_code).startswith('4'):
                 return await ctx.send(
                     f"couldn't connect to the provided link. its returning {response.status_code} error\nor try with headless browser  in crawlnext")
-            else:
+            elif result.used_cloudscraper:
                 await ctx.send("> **Cloudflare is detected.. Turned on  the cloudscraper**", delete_after=10)
         else:
             data = await res.read()
             raw_page_bytes = data
-            soup = BeautifulSoup(data, "html.parser")
-            soup1 = BeautifulSoup(data, "lxml")
+            soup = make_soup(data)
+            soup1 = make_soup(data)
 
         self.titlecss = CssSelector.findchptitlecss(link)
         maintitleCSS = self.titlecss[0]
@@ -623,8 +652,11 @@ class Crawler(commands.Cog):
             print(e)
             try:
                 title_name = ""
-                scraper = cloudscraper.CloudScraper(delay=10)  # CloudScraper inherits from requests.Session
-                response = await self.bot.loop.run_in_executor(None, lambda: scraper.get(link, timeout=10))
+                result = await self.bot.loop.run_in_executor(None, net_session.get, link)
+                if result.blocked or result.response is None:
+                    self.bot.logger.warning(f"[crawl] Title re-fetch failed after bounded attempts | link={link} | error={result.error}")
+                    raise Exception(result.error or "site unreachable")
+                response = result.response
                 raw_page_bytes = response.content
                 html = response.text
                 sel = parsel.Selector(html)
@@ -764,11 +796,17 @@ class Crawler(commands.Cog):
             else:
                 if hasattr(self.bot, 'logger'):
                     self.bot.logger.info(f"[crawl] response is None for {link}")
-        scraper = cloudscraper.CloudScraper(delay=10)
         if urls == [] or len(urls) < 30:
-            response = await self.bot.loop.run_in_executor(None, lambda: scraper.get(link))
+            result = await self.bot.loop.run_in_executor(None, net_session.get, link)
+            if result.blocked or result.response is None:
+                self.bot.logger.warning(f"[crawl] TOC re-fetch failed after bounded attempts | link={link} | error={result.error}")
+                net_session.close()
+                return await ctx.send(
+                    f"> **❌Couldn't access this site (looks Cloudflare-protected and didn't clear after "
+                    f"{net_utils.CrawlSession.MAX_CLOUD_ATTEMPTS} attempts). Please try again later.**")
+            response = result.response
             raw_page_bytes = response.content
-            soup = BeautifulSoup(raw_page_bytes, "html.parser")
+            soup = make_soup(raw_page_bytes)
             urls = await find_urls(soup, link, name)
             if len(urls) > 30:
                 cloudscrape = True
@@ -787,7 +825,7 @@ class Crawler(commands.Cog):
         # If title still looks corrupted, reparse from raw bytes without forced encoding.
         if self._is_bad_title(title_name) and raw_page_bytes:
             try:
-                raw_soup = BeautifulSoup(raw_page_bytes, "html.parser")
+                raw_soup = make_soup(raw_page_bytes)
                 raw_match = raw_soup.select_one(maintitleCSS)
                 if raw_match is not None:
                     title_name = self._clean_title_text(raw_match.get_text(" ", strip=True))
@@ -809,11 +847,14 @@ class Crawler(commands.Cog):
                 toc_list.append(next_link)
                 print(next_link)
                 if cloudscrape:
-                    response = scraper.get(next_link, timeout=10)
-                    soup = BeautifulSoup(response.text, "html.parser")
+                    result = await self.bot.loop.run_in_executor(None, net_session.get, next_link)
+                    if result.blocked or result.response is None:
+                        self.bot.logger.warning(f"[crawl] Multi-TOC fetch failed after bounded attempts | link={next_link} | error={result.error}")
+                        break
+                    soup = make_soup(result.response.text)
                 else:
                     response = await self.bot.con.get(next_link)
-                    soup = BeautifulSoup(await response.read(), "html.parser")
+                    soup = make_soup(await response.read())
                 toc_urls = await find_urls(soup, next_link, name)
                 for u in toc_urls:
                     urls.append(u)
@@ -1051,6 +1092,10 @@ class Crawler(commands.Cog):
             print(traceback.format_exc())
         finally:
             try:
+                net_session.close()
+            except Exception:
+                pass
+            try:
                 del text
                 del whole
                 del parsed
@@ -1161,6 +1206,8 @@ class Crawler(commands.Cog):
             await ctx.defer()
         except:
             pass
+        # One reusable, pooled fetch session for this /crawlnext invocation.
+        net_session = net_utils.CrawlSession(allow_cloudscrape=True)
         driver = None
         if "trxs" in firstchplink or "jpxs" in firstchplink or "bixiang" in firstchplink or "powanjuan" in firstchplink or "ffxs" in firstchplink or "qbtr" in firstchplink or "tongrenquan" in firstchplink:
             return await ctx.reply("> **Use crawl command**")
@@ -1224,8 +1271,14 @@ class Crawler(commands.Cog):
                     lambda d: d.execute_script('return document.readyState') == 'complete'
                 )
             elif cloudscrape:
-                scraper = cloudscraper.CloudScraper(delay=10)
-                response = await self.bot.loop.run_in_executor(None, lambda: scraper.get(firstchplink, headers=FileHandler.get_handler(), timeout=20))
+                result = await self.bot.loop.run_in_executor(None, net_session.get, firstchplink)
+                if result.blocked or result.response is None:
+                    self.bot.logger.warning(f"[crawlnext] Site unreachable after bounded cloudscraper attempts | link={firstchplink} | error={result.error}")
+                    net_session.close()
+                    return await ctx.reply(
+                        f"> **❌Couldn't access this site (looks Cloudflare-protected and didn't clear after "
+                        f"{net_utils.CrawlSession.MAX_CLOUD_ATTEMPTS} attempts). Please try again later.**")
+                response = result.response
                 await ctx.send("Cloudscrape is turned ON", delete_after=8)
                 await asyncio.sleep(0.25)
 
@@ -1253,14 +1306,14 @@ class Crawler(commands.Cog):
                 WebDriverWait(driver, 10).until(
                     lambda d: d.execute_script('return document.readyState') == 'complete'
                 )
-                soup = BeautifulSoup(driver.page_source, "html.parser")
+                soup = make_soup(driver.page_source)
                 htm = driver.page_source
             else:
                 response.encoding = response.apparent_encoding
-                soup = BeautifulSoup(response.content, 'html5lib', from_encoding=response.encoding)
+                soup = make_soup(response.content, from_encoding=response.encoding)
                 htm = response.text
         else:
-            soup = BeautifulSoup(driver.page_source, "html.parser")
+            soup = make_soup(driver.page_source)
             htm = driver.page_source
         sel = parsel.Selector(htm)
         sel_tag = False
@@ -1281,7 +1334,7 @@ class Crawler(commands.Cog):
             response = await self.bot.loop.run_in_executor(None, lambda: requests.get(firstchplink, headers=headers, timeout=20))
             response.encoding = response.apparent_encoding
             sel = parsel.Selector(response.text)
-            soup = BeautifulSoup(response.content, 'html5lib', from_encoding=response.encoding)
+            soup = make_soup(response.content, from_encoding=response.encoding)
             secondchplink = await self.bot.loop.run_in_executor(None, FileHandler.find_next_chps, soup,
                                                                     firstchplink)
             # secondchplink: str = await FileHandler.find_next_chps(soup, firstchplink)
@@ -1348,7 +1401,13 @@ class Crawler(commands.Cog):
             title = driver.title
         title = self._clean_title_text(title)
         chp_count = 1
-        scraper = None
+        # Bug fix: this used to be unconditionally reset to None here,
+        # which silently dropped the CloudScraper session created above
+        # for `cloudscrape` sites after chapter 1 - every chapter after
+        # that fell back to a plain aiohttp fetch and re-hit the same
+        # Cloudflare block. Now the same reusable cloudscraper session is
+        # kept for the whole run whenever cloudscrape mode is active.
+        scraper = net_session.get_cloud_session() if cloudscrape else None
         # print(title)
         if "69shu" in firstchplink or "69xinshu.com" in firstchplink:
             title = title.split("-")[0]
@@ -1404,7 +1463,13 @@ class Crawler(commands.Cog):
         library: int = await FileHandler.checkLibrary(novel_data, title_name, title, original_Language, ctx, self.bot)
         if library == 0:
             return None
-        crawled_urls = []
+        # VisitedTracker normalizes URLs (drops fragments, ignores
+        # scheme/host case, ignores a single trailing slash) so a
+        # "next chapter" link that superficially differs from an
+        # already-crawled link (e.g. trailing "/" or "#top") is still
+        # correctly recognised as a repeat - this is what actually drives
+        # the loop-stopping logic below.
+        crawled_urls = VisitedTracker(base=firstchplink)
         repeats = 0
         no_tries = 0
         if self.bot.chrome == 1:
@@ -1494,14 +1559,25 @@ class Crawler(commands.Cog):
                         self.bot.logger.debug(f"[crawlnext] Progress | user={ctx.author.id} | chp={i}/{noofchapters} | current_link={current_link}")
                     if current_link in crawled_urls:
                         repeats += 1
-                        try:
-                            driver.close()
-                        except:
-                            pass
-                        driver = await self.bot.loop.run_in_executor(None, get_driver)
+                        if headless:
+                            # driver.close() only closes the current window,
+                            # not the underlying Chrome/driver process -
+                            # quit() is required or repeated restarts leak
+                            # a Chrome process each time on the t3.micro.
+                            try:
+                                driver.quit()
+                            except Exception:
+                                pass
+                            try:
+                                driver = await self.bot.loop.run_in_executor(None, get_driver)
+                            except BrowserStartupError as _be:
+                                self.bot.logger.warning(f"[crawlnext] browser restart failed | user={ctx.author.id} | {_be}")
+                                del self.bot.crawler_next[ctx.author.id]
+                                return await ctx.send("> Headless browser could not be restarted. Stopping crawl.")
                     if current_link in crawled_urls and repeats > 5:
-                        if i >= 30:
-                            break
+                        # Stop as soon as the safe-stop threshold is hit
+                        # instead of spinning through up to 30 more
+                        # iterations on a link we already know is looping.
                         del self.bot.crawler_next[ctx.author.id]
                         if current_link == firstchplink and i < 10:
                             return await ctx.reply(
@@ -1517,6 +1593,15 @@ class Crawler(commands.Cog):
                                                        next_chp_find,
                                                        driver)
                         chp_text = str(output[0])
+                        # getcontent() may internally recreate the driver
+                        # (e.g. after a WebDriverWait timeout) - without
+                        # capturing it back here, this loop would keep
+                        # calling getcontent() with a stale, already-quit()
+                        # driver reference every subsequent chapter, and the
+                        # replacement driver getcontent created would never
+                        # be quit() (a leaked Chrome process per chapter).
+                        if headless and len(output) > 2 and output[2] is not None:
+                            driver = output[2]
                     except Exception as e:
                         if i <= 10:
                             print(e)
@@ -1534,12 +1619,17 @@ class Crawler(commands.Cog):
                     if chp_text == 'error':
                         no_of_tries += 1
                         chp_text = ''
-                        if no_of_tries % 2 != 0:
+                        if no_of_tries % 2 != 0 and headless:
                             try:
-                                driver.close()
-                            except:
+                                driver.quit()
+                            except Exception:
                                 pass
-                            driver = await self.bot.loop.run_in_executor(None, get_driver)
+                            try:
+                                driver = await self.bot.loop.run_in_executor(None, get_driver)
+                            except BrowserStartupError as _be:
+                                self.bot.logger.warning(f"[crawlnext] browser restart failed | user={ctx.author.id} | {_be}")
+                                del self.bot.crawler_next[ctx.author.id]
+                                return await ctx.send("> Headless browser could not be restarted. Stopping crawl.")
                         if no_of_tries > 30:
                             # await msg.delete()
                             del self.bot.crawler_next[ctx.author.id]
@@ -1553,7 +1643,7 @@ class Crawler(commands.Cog):
                         print('break')
                         break
                     chp_count += 1
-                    crawled_urls.append(current_link)
+                    crawled_urls.add(current_link)
                     current_link = output[1]
                     if waittime:
                         await asyncio.sleep(waittime)
@@ -1565,18 +1655,28 @@ class Crawler(commands.Cog):
                         if i % 50 == 0:
                             if headless:
                                 try:
-                                    driver.close()
-                                except:
+                                    driver.quit()
+                                except Exception:
                                     pass
-                                driver = await self.bot.loop.run_in_executor(None, get_driver)
+                                try:
+                                    driver = await self.bot.loop.run_in_executor(None, get_driver)
+                                except BrowserStartupError as _be:
+                                    self.bot.logger.warning(f"[crawlnext] browser restart failed | user={ctx.author.id} | {_be}")
+                                    del self.bot.crawler_next[ctx.author.id]
+                                    return await ctx.send("> Headless browser could not be restarted. Stopping crawl.")
                             await asyncio.sleep(4.5 * waittime)
                     elif random.randint(0, 50) == 10 or chp_count % 100 == 0:
                         if headless:
                             try:
-                                driver.close()
-                            except:
+                                driver.quit()
+                            except Exception:
                                 pass
-                            driver = await self.bot.loop.run_in_executor(None, get_driver)
+                            try:
+                                driver = await self.bot.loop.run_in_executor(None, get_driver)
+                            except BrowserStartupError as _be:
+                                self.bot.logger.warning(f"[crawlnext] browser restart failed | user={ctx.author.id} | {_be}")
+                                del self.bot.crawler_next[ctx.author.id]
+                                return await ctx.send("> Headless browser could not be restarted. Stopping crawl.")
                         await asyncio.sleep(1)
                         full_text = full_text + f"\n\n for more novels ({random.randint(1000, 200000)}) join: https://discord.gg/SZxTKASsHq\n"
 
@@ -1637,6 +1737,10 @@ class Crawler(commands.Cog):
             print(traceback.format_exc())
             await ctx.send("> Error occurred .Please report to admin +\n" + str(e))
         finally:
+            try:
+                net_session.close()
+            except Exception:
+                pass
             if self.bot.chrome == 1:
                 self.bot.chrome = 0
             if driver is not None:
