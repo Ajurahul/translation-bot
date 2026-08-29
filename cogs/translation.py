@@ -22,6 +22,8 @@ from core.bot import Raizel
 from core.views.ButtonView import ButtonsV
 from core.views.linkview import LinkView
 from languages.terms import terms
+from translation.errors import AllEnginesFailedError, InvalidEngineError, TranslationFailedError
+from translation.registry import registry as translation_registry
 from utils.handler import FileHandler
 from utils.hints import Hints
 from utils.progress import Progress
@@ -79,7 +81,8 @@ class Translate(commands.Cog):
             rawname: str = None,
             library_id: int = None,
             term: str = None,
-            ignore_warnings: bool = False
+            ignore_warnings: bool = False,
+            translation_engine: str = "default",
     ):
         """Check the leaderboard of a user
                Parameters
@@ -157,6 +160,16 @@ class Translate(commands.Cog):
                 f"**❌We have the following languages in our db.**\n```ini\n{self.bot.display_langs}```"
             )
         language = await FileHandler.get_language(language)
+        engine_selector = (translation_engine or "default").strip().lower()
+        if engine_selector not in ("default", "auto") and not translation_registry.is_provider_available(
+                engine_selector):
+            available = ", ".join(
+                translation_registry.get_display_name(n) for n in translation_registry.get_available_providers()
+            ) or "none currently available"
+            return await ctx.reply(
+                f"> **❌ Unknown or unavailable translation engine: `{translation_engine}`.**\n"
+                f"Use `Default`, `Auto`, or one of: {available}"
+            )
         if ctx.author.id in self.bot.translator and not ctx.author.id == 925597069748621353:
             return await ctx.send("> **❌You cannot translate two novels at a time.**", ephemeral=True)
         if not ctx.message.attachments and not file and messageid is None:
@@ -553,6 +566,11 @@ class Translate(commands.Cog):
                                   colour=discord.Colour.blurple())
             embed.set_thumbnail(url=avatar)
             embed.add_field(name="Translating to", value=language, inline=True)
+            embed.add_field(name="Engine", value=(
+                "Default" if engine_selector == "default" else
+                "Auto" if engine_selector == "auto" else
+                translation_registry.get_display_name(engine_selector)
+            ), inline=True)
             embed.add_field(name="From", value=original_Language, inline=True)
             embed.add_field(name="Size", value=f"{round(size / (1024 ** 2), 2)} MB", inline=True)
             embed.set_footer(text=f"Hint : {await Hints.get_single_hint()}", icon_url=await Hints.get_avatar())
@@ -584,7 +602,7 @@ class Translate(commands.Cog):
             await FileHandler.update_status(self.bot)
             if ctx.author.id != 925597069748621353:
                 task = asyncio.create_task(self.cc_prog(rep_msg, embed=embed, author_id=ctx.author.id, timer=len(asyncio.all_tasks())-1))
-            translate = Translator(self.bot, ctx.author.id, language)
+            translate = Translator(self.bot, ctx.author.id, language, engine=engine_selector)
             if len(liz) < 1700:
                 story = await translate.start(liz, len(asyncio.all_tasks()))
                 # Clean any error messages from the translated story
@@ -604,7 +622,7 @@ class Translate(commands.Cog):
                 for liz_t in chunks:
                     cnt += 1
                     self.bot.translator[ctx.author.id] = f"0/{len(liz_t)}"
-                    translate = Translator(self.bot, ctx.author.id, language)
+                    translate = Translator(self.bot, ctx.author.id, language, engine=engine_selector)
                     try:
                         pr_msg = await ctx.reply(
                             content=f"> Translating {str(cnt)} chunks out of {str(len(chunks))}... use .tp to "
@@ -672,6 +690,20 @@ class Translate(commands.Cog):
         except Exception as e:
             if "Translation stopped" in str(e):
                 return await ctx.send("Translation stopped")
+            elif isinstance(e, (TranslationFailedError, InvalidEngineError)):
+                return await ctx.send(
+                    f"> **❌ {e}**\n"
+                    f"The selected translation engine is currently unavailable.\n"
+                    f"Please try again with:\n"
+                    f"\u2022 Auto\n"
+                    f"\u2022 another translation engine"
+                )
+            elif isinstance(e, AllEnginesFailedError):
+                return await ctx.send(
+                    "> **❌ Auto translation failed.**\n"
+                    "All available translation engines are currently unavailable. "
+                    "Please try again later or select another engine."
+                )
             else:
                 print(e)
                 traceback.print_exc()
@@ -717,6 +749,19 @@ class Translate(commands.Cog):
     ) -> list[app_commands.Choice]:
         lst = [i for i in self.bot.all_langs if language.lower() in i.lower()][:25]
         return [app_commands.Choice(name=i, value=i) for i in lst]
+
+    @translate.autocomplete("translation_engine")
+    async def translate_engine_complete(
+            self, inter: discord.Interaction, current: str
+    ) -> list[app_commands.Choice]:
+        current_lower = (current or "").lower()
+        options = [("Default", "default"), ("Auto", "auto")]
+        options += [
+            (translation_registry.get_display_name(name), name)
+            for name in translation_registry.get_available_providers()
+        ]
+        filtered = [pair for pair in options if current_lower in pair[0].lower()][:25]
+        return [app_commands.Choice(name=name, value=value) for name, value in filtered]
 
     async def cc_prog(self, msg: discord.Message, embed: discord.Embed, author_id: int, timer: int =8) -> typing.Optional[
         discord.Message]:

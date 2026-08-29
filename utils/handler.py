@@ -30,8 +30,8 @@ from core.bot import Raizel
 from core.views.linkview import LinkView
 from databases.data import Novel
 from languages import languages
+from translation.detection import detect_language_code
 from utils.category import Categories
-from utils.translate import Translator
 
 from PIL import Image, ImageDraw
 
@@ -397,23 +397,45 @@ class FileHandler:
         return language.pop()
 
     @staticmethod
+    @staticmethod
+    def should_auto_translate(original_language, translate_to=None, add_terms=None) -> bool:
+        """Whether the crawler should kick off an automatic
+        translate-to-English pass after detecting a novel's language.
+
+        A source language must have actually been *detected* -- "NA"
+        (detection failed/inconclusive) must never trigger an automatic
+        translation, since we're not confident the novel isn't already
+        in English (or any other language the caller might want left
+        alone). Only fires when the caller hasn't already picked a
+        target language or term set."""
+        if translate_to is not None or add_terms is not None:
+            return False
+        if original_language is None:
+            return False
+        normalized = str(original_language).strip().lower()
+        return normalized not in ("english", "en", "na", "")
+
+    @staticmethod
     async def find_language(text: str, link: str = None) -> str:
         if link is not None:
             for l in ["bixiange", "trxs", "txt520", "powanjuan", "tongrenquan", "jpxs", "ptwxz", "qidian",
                       "xindingdian", "longteng", "akshu8", "qbtr"]:
                 if l in link:
                     return 'chinese (simplified)'
-        try:
-            if "title_name " in text:
-                text = text.replace("title_name ", "")
-                lang_code = await Translator.adetect_with_retry(str(text[:120]))
-            else:
-                lang_code = await Translator.adetect_with_retry(text[200:250].__str__())
-        except:
-            try:
-                lang_code = await Translator.adetect_with_retry(text[1:100].__str__())
-            except:
-                lang_code = 'NA'
+
+        if "title_name " in text:
+            text = text.replace("title_name ", "")
+            samples = [text[:120], text[600:700], text[200:250], text[1:100]]
+        else:
+            samples = [text[200:250], text[1:100], text[600:700]]
+
+        # Tries every sample against every available detector (offline
+        # langdetect first, then googletrans as a network-based backstop)
+        # before giving up -- far more resilient than the old
+        # single-sample/single-engine attempt, which is what was making
+        # this return "NA" so often.
+        lang_code = await detect_language_code(samples=samples)
+
         if lang_code in ('zh', 'zh-cn'):
             original_Language = ['chinese (simplified)']
         elif lang_code == 'zh-tw':
@@ -423,17 +445,23 @@ class FileHandler:
         else:
             lang = languages.choices
             original_Language = {i for i in lang if lang[i] == lang_code}
-        if original_Language == set() or original_Language == [set()]:
-            original_Language = await FileHandler.find_language(text[600:700])
+            if not original_Language:
+                # We detected *a* code, just not one we have a friendly
+                # name for -- try once more against fresh slices before
+                # giving up, rather than immediately reporting "NA".
+                fallback_code = await detect_language_code(samples=[text[600:700], text[300:400]])
+                if fallback_code in ('zh', 'zh-cn'):
+                    original_Language = ['chinese (simplified)']
+                elif fallback_code == 'zh-tw':
+                    original_Language = ['chinese (traditional)']
+                else:
+                    original_Language = {i for i in lang if lang[i] == fallback_code} or ['NA']
 
         try:
-            original_Language = original_Language.pop()
-        except:
-            try:
-                original_Language = original_Language.replace("['", "").replace("']", "")
-            except:
-                pass
-        return original_Language
+            original_Language = original_Language.pop() if original_Language else 'NA'
+        except Exception:
+            original_Language = 'NA'
+        return original_Language or 'NA'
 
     @staticmethod
     async def checkname(name: str, bot: Raizel):

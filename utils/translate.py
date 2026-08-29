@@ -1,169 +1,60 @@
 import asyncio
-import threading
-try:
-    from asyncio import Timeout
-except ImportError:
-    from async_timeout import Timeout
-
-
 import concurrent.futures
-import re
 import time
 import typing as t
 
-from deep_translator import GoogleTranslator as DeepGoogleTranslator
-from googletrans import Translator as GoogleTransClient
-
-try:
-    import translators as bing_translators
-    _BING_AVAILABLE = True
-except ImportError:
-    bing_translators = None
-    _BING_AVAILABLE = False
-
 from core.bot import Raizel
 from languages import languages
+from translation.detection import detect_language_code
+from translation.errors import TranslationError
+from translation.errors import filter_error_text as _filter_error_text_impl
+from translation.errors import is_error_response as _is_error_response_impl
+from translation.manager import TranslationManager
 
 
 class Translator:
-    GOOGLETRANS_SERVICE_URLS = [
-        "translate.google.com",
-        "translate.google.co.in",
-        "translate.google.co.kr",
-        "translate.google.co.uk",
-        "translate.google.ca",
-        "translate.google.com.au",
-        "translate.google.de",
-        "translate.google.fr",
-        "translate.google.es",
-        "translate.google.it",
-        "translate.google.co.jp",
-    ]
+    """Backward-compatible facade over the translation.* package.
 
-    # Fixed try-order per round: deep translator first, then googletrans,
-    # then bing (if the optional dependency is installed). Every round
-    # tries each of these exactly once before giving up on that round.
-    ENGINE_SEQUENCE = ["deep", "googletrans"] + (["bing"] if _BING_AVAILABLE else [])
+    Historically this class contained all of the engine-specific
+    translation logic (googletrans/deep-translator/bing switching,
+    retries, error detection) inline. That logic now lives in
+    translation/manager.py + translation/providers/*.py so it can be
+    reused outside the Discord chunk-translation flow (e.g. by the admin
+    command's availability checks) and unit tested in isolation.
 
-    # deep_translator/googletrans use Google's own language codes (from
-    # languages.py). Bing/Microsoft expects different codes for a few of
-    # these -- notably Chinese. Only include entries where they actually
-    # differ; anything not listed here is passed through unchanged (this
-    # covers ko/en/id and the vast majority of other languages already).
-    BING_LANGUAGE_OVERRIDES: t.Dict[str, str] = {
-        "zh-cn": "zh-Hans",
-        "zh-tw": "zh-Hant",
-        "iw": "he",     # Google's old code for Hebrew
-        "tl": "fil",    # Google uses "tl" (Tagalog) for what Bing calls Filipino
-    }
+    Every existing call site keeps working unchanged:
+      - Translator(bot, user, language) / .translates() / .start()
+      - Translator.translate_with_retry(...) / .atranslate_with_retry(...)
+      - Translator.translate_batch_with_retry(...) / .atranslate_batch_with_retry(...)
+      - Translator.detect_with_retry(...) / .adetect_with_retry(...)
+      - Translator._is_error_500_response(...) / Translator._filter_error_text(...)
 
-    # --- Circuit breaker -------------------------------------------------
-    # If an engine keeps failing across *any* worker (not just within a
-    # single call's own retry loop), put it in a short cooldown so every
-    # other concurrent chunk stops wasting attempts on it too. This matters
-    # a lot once you have several chunks translating in parallel: without
-    # this, each one independently retries the dead engine before falling
-    # back, all at the same time.
-    #
-    # NOTE: cooldown only *deprioritizes* an engine within a round -- if
-    # every engine happens to be cooling down at once we still try all of
-    # them anyway (see _get_engine_order), so a round is never skipped
-    # entirely.
-    ENGINE_COOLDOWN_THRESHOLD = 2        # consecutive global failures before cooldown
-    ENGINE_COOLDOWN_SECONDS = 90         # how long to avoid a tripped engine
-    # Hard ceiling on a single engine call. Without this, a stalled/blocked
-    # engine (no response, connection hangs) can block a worker thread far
-    # longer than any of the retry_delays below would suggest -- this is
-    # what turns a handful of bad chunks into a 45-minute job.
-    ENGINE_CALL_TIMEOUT_SECONDS = 10
-    _engine_failure_counts: t.Dict[str, int] = {}
-    _engine_cooldown_until: t.Dict[str, float] = {}
-    _engine_lock = threading.Lock()
+    New code can additionally pass `engine=` to select "default" (the
+    admin-configured engine, persisted in config/translation_settings.json),
+    "auto" (intelligent per-job failover), or a specific provider id from
+    translation.registry (e.g. "translators-bing").
+    """
 
-    def __init__(self, bot: Raizel, user: int, language: str) -> None:
+    def __init__(self, bot: Raizel, user: int, language: str, engine: str = "default") -> None:
         self.bot = bot
         self.user = user
         self.language = language
         self.order = {}
+        self.engine = engine
+        self._manager = TranslationManager(engine=engine)
 
-    @classmethod
-    def _is_engine_cooling_down(cls, engine: str) -> bool:
-        until = cls._engine_cooldown_until.get(engine)
-        return until is not None and time.time() < until
+    @property
+    def manager(self) -> TranslationManager:
+        return self._manager
 
-    @classmethod
-    def _note_engine_failure(cls, engine: str) -> None:
-        with cls._engine_lock:
-            count = cls._engine_failure_counts.get(engine, 0) + 1
-            if count >= cls.ENGINE_COOLDOWN_THRESHOLD:
-                cls._engine_cooldown_until[engine] = time.time() + cls.ENGINE_COOLDOWN_SECONDS
-                count = 0
-            cls._engine_failure_counts[engine] = count
-
-    @classmethod
-    def _note_engine_success(cls, engine: str) -> None:
-        with cls._engine_lock:
-            cls._engine_failure_counts[engine] = 0
-            cls._engine_cooldown_until.pop(engine, None)
-
-    @classmethod
-    def _get_engine_order(cls) -> t.List[str]:
-        """Fixed deep -> googletrans -> bing order. `deep` is the cheap,
-        reliable, low-latency engine and should always be tried first
-        while it's healthy -- googletrans/bing are pure fallbacks for
-        when deep is down, not alternatives to promote just because they
-        happened to succeed once (they're both noticeably slower per call
-        even when they work, so promoting them tanks average throughput).
-        Anything currently cooling down (repeated recent failures) is
-        skipped entirely, unless every engine is cooling down, in which
-        case we fall back to trying all of them rather than nothing."""
-        healthy = [e for e in cls.ENGINE_SEQUENCE if not cls._is_engine_cooling_down(e)]
-        return healthy if healthy else list(cls.ENGINE_SEQUENCE)
-
+    # -- response validation helpers (kept for backward compatibility) --
     @staticmethod
     def _is_error_500_response(translated: t.List[str]) -> bool:
-        """Detect if response is a Google Translate error page."""
-        if not translated:
-            return False
-
-        joined = " ".join(str(part) for part in translated).lower()
-        joined = joined.replace("’", "'")
-
-        # Error page markers
-        error_indicators = (
-            "error 500",
-            "server error",
-            "that's an error",
-            "there was an error",
-            "please try again later",
-            "that's all we know",
-        )
-
-        # Count how many error indicators are present
-        marker_hits = sum(indicator in joined for indicator in error_indicators)
-
-        # If we see "error 500" OR multiple error markers, it's an error response
-        is_error = ("error 500" in joined) or (marker_hits >= 2)
-
-        return is_error
+        return _is_error_response_impl(translated)
 
     @staticmethod
     def _filter_error_text(text: str) -> str:
-        """Remove error messages from text as a safety measure."""
-        if not text:
-            return text
-
-        # Pattern to detect and remove error pages
-        error_patterns = [
-            r"Error 500.*?(?=\n[A-Za-zÀ-ÿ]|\Z)",  # Error 500 followed by actual text or end
-            r"(?:error|server error|that's an error|there was an error|please try again later).*?(?=\n[A-Za-zÀ-ÿ]|\Z)",
-        ]
-
-        result = text
-        for pattern in error_patterns:
-            result = re.sub(pattern, "", result, flags=re.IGNORECASE | re.DOTALL)
-
-        return result.strip()
+        return _filter_error_text_impl(text)
 
     @staticmethod
     def _normalize_language(value: str, fallback: str = "en") -> str:
@@ -188,204 +79,101 @@ class Translator:
             future = executor.submit(lambda: asyncio.run(async_fn(*args, **kwargs)))
             return future.result()
 
+    # -- one-off helpers (title/description translation etc). These are
+    # not tied to any particular translation job, so they default to Auto
+    # for resilience regardless of what engine a running job selected. --
     @staticmethod
-    def _validate_and_clean_translations(translated: t.List[str]) -> t.List[str]:
-        if Translator._is_error_500_response(translated):
-            raise RuntimeError("translation returned Error 500 response body")
-
-        cleaned = [Translator._filter_error_text(str(text)) for text in translated]
-
-        # Re-check after filtering so partial error payloads are never returned.
-        if Translator._is_error_500_response(cleaned):
-            raise RuntimeError("translation returned Error 500 response body")
-
-        return cleaned
-
-    @staticmethod
-    async def _translate_text_with_deep(
+    async def atranslate_with_retry(
             text: str,
-            target_code: str,
-            source_code: str,
+            target: str = "english",
+            source: str = "auto",
+            retry_delays: t.Optional[t.List[int]] = None,
+            engine: str = "auto",
     ) -> str:
-        def _work() -> str:
-            translator = DeepGoogleTranslator(source=source_code, target=target_code)
-            return str(translator.translate(str(text)))
-
-        return await asyncio.to_thread(_work)
-
-    @staticmethod
-    async def _translate_batch_with_deep(
-            chapter: t.List[str],
-            target_code: str,
-            source_code: str,
-    ) -> t.List[str]:
-        def _work() -> t.List[str]:
-            translator = DeepGoogleTranslator(source=source_code, target=target_code)
-            if hasattr(translator, "translate_batch"):
-                translated = translator.translate_batch(chapter)
-                return [str(item) for item in translated]
-            return [str(translator.translate(str(item))) for item in chapter]
-
-        return await asyncio.to_thread(_work)
+        manager = TranslationManager(engine=engine)
+        target_code = Translator._normalize_language(target, fallback="en")
+        source_code = Translator._normalize_language(source, fallback="auto")
+        try:
+            return await manager.translate(str(text), source_code, target_code)
+        except TranslationError as e:
+            raise RuntimeError(str(e)) from e
 
     @staticmethod
-    async def _translate_text_with_googletrans(
+    def translate_with_retry(
             text: str,
-            target_code: str,
-            source_code: str,
+            target: str = "english",
+            source: str = "auto",
+            retry_delays: t.Optional[t.List[int]] = None,
+            engine: str = "auto",
     ) -> str:
-        async with GoogleTransClient(
-                timeout=Timeout(15.0),
-                raise_exception=True,
-                service_urls=Translator.GOOGLETRANS_SERVICE_URLS,
-        ) as translator:
-            translated = await translator.translate(
-                str(text),
-                dest=target_code,
-                src=source_code,
-            )
-        return str(getattr(translated, "text", translated))
+        return Translator._run_async_blocking(
+            Translator.atranslate_with_retry, text, target, source, retry_delays, engine,
+        )
 
     @staticmethod
-    async def _translate_batch_with_googletrans(
+    async def atranslate_batch_with_retry(
             chapter: t.List[str],
-            target_code: str,
-            source_code: str,
+            target: str,
+            source: str = "auto",
+            retry_delays: t.Optional[t.List[int]] = None,
+            engine: str = "auto",
     ) -> t.List[str]:
-        async with GoogleTransClient(
-                timeout=Timeout(15.0),
-                raise_exception=True,
-                service_urls=Translator.GOOGLETRANS_SERVICE_URLS,
-        ) as translator:
-            translated = await translator.translate(
-                chapter,
-                dest=target_code,
-                src=source_code,
-            )
-        if not isinstance(translated, list):
-            translated = [translated]
-        return [str(getattr(item, "text", item)) for item in translated]
+        manager = TranslationManager(engine=engine)
+        target_code = Translator._normalize_language(target, fallback="en")
+        source_code = Translator._normalize_language(source, fallback="auto")
+        try:
+            return await manager.translate_batch(list(chapter), source_code, target_code)
+        except TranslationError as e:
+            raise RuntimeError(str(e)) from e
 
     @staticmethod
-    def _to_bing_code(code: str) -> str:
-        if not code or code == "auto":
-            return "auto"
-        return Translator.BING_LANGUAGE_OVERRIDES.get(code.lower(), code)
-
-    @staticmethod
-    async def _translate_text_with_bing(
-            text: str,
-            target_code: str,
-            source_code: str,
-    ) -> str:
-        def _work() -> str:
-            result = bing_translators.translate_text(
-                str(text),
-                translator="bing",
-                from_language=Translator._to_bing_code(source_code),
-                to_language=Translator._to_bing_code(target_code),
-            )
-            return str(result)
-
-        return await asyncio.to_thread(_work)
-
-    @staticmethod
-    async def _translate_batch_with_bing(
+    def translate_batch_with_retry(
             chapter: t.List[str],
-            target_code: str,
-            source_code: str,
+            target: str,
+            source: str = "auto",
+            retry_delays: t.Optional[t.List[int]] = None,
+            engine: str = "auto",
     ) -> t.List[str]:
-        def _work() -> t.List[str]:
-            from_code = Translator._to_bing_code(source_code)
-            to_code = Translator._to_bing_code(target_code)
-            return [
-                str(bing_translators.translate_text(
-                    str(item),
-                    translator="bing",
-                    from_language=from_code,
-                    to_language=to_code,
-                ))
-                for item in chapter
-            ]
+        return Translator._run_async_blocking(
+            Translator.atranslate_batch_with_retry, chapter, target, source, retry_delays, engine,
+        )
 
-        return await asyncio.to_thread(_work)
+    # -- instance-level batch call, routed through this job's manager so
+    # Auto mode's "remember the healthy engine" behavior applies across
+    # every chunk of this particular translation job --------------------
+    async def _atranslate_batch_with_retry(self, chapter: t.List[str]) -> t.List[str]:
+        target_code = Translator._normalize_language(self.language, fallback="en")
+        try:
+            return await self._manager.translate_batch(list(chapter), "auto", target_code)
+        except TranslationError as e:
+            raise RuntimeError(str(e)) from e
 
-    @staticmethod
-    async def _translate_text_with_engine(
-            engine: str,
-            text: str,
-            target_code: str,
-            source_code: str,
-    ) -> str:
-        if engine == "deep":
-            coro = Translator._translate_text_with_deep(
-                text=text, target_code=target_code, source_code=source_code,
-            )
-        elif engine == "bing":
-            coro = Translator._translate_text_with_bing(
-                text=text, target_code=target_code, source_code=source_code,
-            )
-        else:
-            coro = Translator._translate_text_with_googletrans(
-                text=text, target_code=target_code, source_code=source_code,
-            )
-        # Hard ceiling so a stalled engine can never block a worker
-        # indefinitely -- deep_translator and translators (bing) don't
-        # enforce their own timeout, so without this a single hung call
-        # can eat minutes instead of failing over to the next engine.
-        return await asyncio.wait_for(coro, timeout=Translator.ENGINE_CALL_TIMEOUT_SECONDS)
+    def _translate_batch_with_retry(self, chapter: t.List[str]) -> t.List[str]:
+        return Translator._run_async_blocking(self._atranslate_batch_with_retry, chapter)
 
-    @staticmethod
-    async def _translate_batch_with_engine(
-            engine: str,
-            chapter: t.List[str],
-            target_code: str,
-            source_code: str,
-    ) -> t.List[str]:
-        if engine == "deep":
-            coro = Translator._translate_batch_with_deep(
-                chapter=chapter, target_code=target_code, source_code=source_code,
-            )
-        elif engine == "bing":
-            coro = Translator._translate_batch_with_bing(
-                chapter=chapter, target_code=target_code, source_code=source_code,
-            )
-        else:
-            coro = Translator._translate_batch_with_googletrans(
-                chapter=chapter, target_code=target_code, source_code=source_code,
-            )
-        return await asyncio.wait_for(coro, timeout=Translator.ENGINE_CALL_TIMEOUT_SECONDS)
-
+    # -- language detection now tries multiple independent detectors
+    # (see translation/detection.py) so a single provider's outage/rate
+    # limit can no longer make this return "NA" by itself -- retried
+    # (with delay) as a whole chain, since a transient network condition
+    # can still affect every network-based detector in the same round.
     @staticmethod
     async def adetect_with_retry(
             text: str,
             retry_delays: t.Optional[t.List[int]] = None,
     ) -> str:
         delays = retry_delays or [2, 5]
-        last_error: t.Optional[Exception] = None
         sample = str(text or "").strip()
         if not sample:
             return "NA"
 
         for attempt in range(len(delays) + 1):
-            try:
-                async def _detect():
-                    async with GoogleTransClient(
-                            timeout=Timeout(10.0),
-                            raise_exception=True,
-                            service_urls=Translator.GOOGLETRANS_SERVICE_URLS,
-                    ) as translator:
-                        return await translator.detect(sample)
+            code = await detect_language_code(sample)
+            if code != "NA":
+                return code
+            if attempt < len(delays):
+                await asyncio.sleep(delays[attempt])
 
-                result = await asyncio.wait_for(_detect(), timeout=10.0)
-                lang = str(getattr(result, "lang", "NA") or "NA").lower()
-                return lang
-            except Exception as e:
-                last_error = e
-                if attempt < len(delays):
-                    await asyncio.sleep(delays[attempt])
-
-        raise last_error or RuntimeError("language detection failed after retries")
+        return "NA"
 
     @staticmethod
     def detect_with_retry(
@@ -398,121 +186,7 @@ class Translator:
             retry_delays,
         )
 
-    @staticmethod
-    async def atranslate_with_retry(
-            text: str,
-            target: str = "english",
-            source: str = "auto",
-            retry_delays: t.Optional[t.List[int]] = None,
-    ) -> str:
-        """Each round tries whichever engines are currently healthy, in
-        order. If a whole round fails (every healthy engine errored), wait
-        the next delay in `retry_delays` and run another round. Kept short
-        on purpose -- the caller (`translate()`) already retries again by
-        splitting the chapter in half, so we don't want two multi-round
-        retry loops stacked on top of each other."""
-        delays = retry_delays or [2, 5]
-        target_code = Translator._normalize_language(target, fallback="en")
-        source_code = Translator._normalize_language(source, fallback="auto")
-
-        last_error: t.Optional[Exception] = None
-
-        for round_index in range(len(delays) + 1):
-            if round_index > 0:
-                await asyncio.sleep(delays[round_index - 1])
-
-            for engine in Translator._get_engine_order():
-                try:
-                    translated_text = await Translator._translate_text_with_engine(
-                        engine=engine,
-                        text=str(text),
-                        target_code=target_code,
-                        source_code=source_code,
-                    )
-
-                    cleaned = Translator._validate_and_clean_translations([translated_text])
-                    Translator._note_engine_success(engine)
-                    return cleaned[0]
-                except Exception as e:
-                    last_error = e
-                    Translator._note_engine_failure(engine)
-
-        raise last_error or RuntimeError("translation failed after retries")
-
-    @staticmethod
-    def translate_with_retry(
-            text: str,
-            target: str = "english",
-            source: str = "auto",
-            retry_delays: t.Optional[t.List[int]] = None,
-    ) -> str:
-        return Translator._run_async_blocking(
-            Translator.atranslate_with_retry,
-            text,
-            target,
-            source,
-            retry_delays,
-        )
-
-    @staticmethod
-    async def atranslate_batch_with_retry(
-            chapter: t.List[str],
-            target: str,
-            source: str = "auto",
-            retry_delays: t.Optional[t.List[int]] = None,
-    ) -> t.List[str]:
-        """Same round-robin/backoff scheme as atranslate_with_retry, but
-        for a batch of strings translated together."""
-        delays = retry_delays or [2, 5]
-        target_code = Translator._normalize_language(target, fallback="en")
-        source_code = Translator._normalize_language(source, fallback="auto")
-
-        last_error: t.Optional[Exception] = None
-
-        for round_index in range(len(delays) + 1):
-            if round_index > 0:
-                await asyncio.sleep(delays[round_index - 1])
-
-            for engine in Translator._get_engine_order():
-                try:
-                    translated_texts = await Translator._translate_batch_with_engine(
-                        engine=engine,
-                        chapter=chapter,
-                        target_code=target_code,
-                        source_code=source_code,
-                    )
-
-                    cleaned = Translator._validate_and_clean_translations(translated_texts)
-                    Translator._note_engine_success(engine)
-                    return cleaned
-                except Exception as e:
-                    last_error = e
-                    Translator._note_engine_failure(engine)
-
-        raise last_error or RuntimeError("translation failed after retries")
-
-    @staticmethod
-    def translate_batch_with_retry(
-            chapter: t.List[str],
-            target: str,
-            source: str = "auto",
-            retry_delays: t.Optional[t.List[int]] = None,
-    ) -> t.List[str]:
-        return Translator._run_async_blocking(
-            Translator.atranslate_batch_with_retry,
-            chapter,
-            target,
-            source,
-            retry_delays,
-        )
-
-    def _translate_batch_with_retry(self, chapter: t.List[str]) -> t.List[str]:
-        return self.translate_batch_with_retry(
-            chapter=chapter,
-            source="auto",
-            target=self.language,
-        )
-
+    # -- chunk translation with recovery (unchanged behavior) -----------
     def translate(self, chapter: t.List[str], num: int) -> t.Tuple[int, t.List[str]]:
         translated = []
 

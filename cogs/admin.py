@@ -11,6 +11,7 @@ import sys
 
 import aiofiles
 import discord
+from discord import app_commands
 from discord.ext import commands
 from mega import Mega
 
@@ -19,6 +20,8 @@ from core import Raizel
 from core.views.linkview import LinkView
 from databases.blocked import User
 from databases.data import Novel
+from translation.config import settings as translation_settings
+from translation.registry import registry as translation_registry
 from utils.category import Categories
 from utils.hints import Hints
 
@@ -680,6 +683,45 @@ class Admin(commands.Cog):
                 await ctx.send(f"❌ Could not get latest commit: {result.stderr}")
         except Exception as e:
             await ctx.send(f"❌ Error: {e}")
+
+
+    @commands.has_role(1020638168237740042)
+    @commands.hybrid_command(
+        help="Admin only: change the bot-wide default translation engine (used by anyone who selects "
+             "'Default' on /translate)."
+    )
+    async def set_translation_engine(self, ctx: commands.Context, engine: str):
+        await ctx.defer()
+        engine_value = (engine or "").strip().lower()
+        if not translation_registry.is_provider_available(engine_value):
+            available = ", ".join(
+                translation_registry.get_display_name(name)
+                for name in translation_registry.get_available_providers()
+            ) or "none currently available"
+            return await ctx.send(
+                f"> **❌ `{engine}` is not a valid/available translation engine.**\nAvailable: {available}"
+            )
+        translation_settings.set_default_engine(engine_value)
+        display = translation_registry.get_display_name(engine_value)
+        try:
+            self.bot.logger.info(
+                f"Default translation engine changed to {engine_value} by {ctx.author.id}"
+            )
+        except Exception:
+            pass
+        await ctx.send(f"✅ Default translation engine changed to **{display}**.")
+
+    @set_translation_engine.autocomplete("engine")
+    async def set_translation_engine_autocomplete(
+            self, inter: discord.Interaction, current: str
+    ) -> list[app_commands.Choice]:
+        current_lower = (current or "").lower()
+        options = [
+            (translation_registry.get_display_name(name), name)
+            for name in translation_registry.get_available_providers()
+        ]
+        filtered = [pair for pair in options if current_lower in pair[0].lower()][:25]
+        return [app_commands.Choice(name=name, value=value) for name, value in filtered]
 
 
 async def setup(bot):
