@@ -22,12 +22,13 @@ from core.bot import Raizel
 from core.views.ButtonView import ButtonsV
 from core.views.linkview import LinkView
 from languages.terms import terms
-from translation.errors import AllEnginesFailedError, InvalidEngineError, TranslationFailedError
-from translation.registry import registry as translation_registry
 from utils.handler import FileHandler
 from utils.hints import Hints
 from utils.progress import Progress
 from utils.translate import Translator
+from translator import registry as engine_registry
+from translator.base import TranslationFailedError
+from translator.manager import EngineChoice
 
 
 def term_raw(text, term_dict):
@@ -82,7 +83,7 @@ class Translate(commands.Cog):
             library_id: int = None,
             term: str = None,
             ignore_warnings: bool = False,
-            translation_engine: str = "default",
+            translation_engine: str = "Auto",
     ):
         """Check the leaderboard of a user
                Parameters
@@ -107,6 +108,11 @@ class Translate(commands.Cog):
                     add the terms available in bot.. currently we only have chinese terms
                ignore_warnings :
                     give true to ignore the library check
+               translation_engine :
+                    which translation engine to use. "Default" uses the admin-configured
+                    default engine, "Auto" (the default) tries engines automatically and
+                    sticks with whichever one works, or pick a specific engine
+                    (e.g. googletrans, deep_translator, bing) to use only that one.
                """
         story = ""
         filetype2 = "txt"
@@ -160,16 +166,20 @@ class Translate(commands.Cog):
                 f"**❌We have the following languages in our db.**\n```ini\n{self.bot.display_langs}```"
             )
         language = await FileHandler.get_language(language)
-        engine_selector = (translation_engine or "default").strip().lower()
-        if engine_selector not in ("default", "auto") and not translation_registry.is_provider_available(
-                engine_selector):
-            available = ", ".join(
-                translation_registry.get_display_name(n) for n in translation_registry.get_available_providers()
-            ) or "none currently available"
-            return await ctx.reply(
-                f"> **❌ Unknown or unavailable translation engine: `{translation_engine}`.**\n"
-                f"Use `Default`, `Auto`, or one of: {available}"
-            )
+        engine_choice = EngineChoice(translation_engine)
+        if not engine_choice.is_auto:
+            engine_spec = engine_registry.get_spec(engine_choice.engine_key)
+            if engine_spec is None:
+                available = ", ".join(s.key for s in engine_registry.available_specs()) or "none configured"
+                return await ctx.reply(
+                    f"> **❌`{translation_engine}` is not a known translation engine.**\n"
+                    f"Available engines: `{available}`, or `Default`/`Auto`."
+                )
+            if not engine_registry.is_engine_available(engine_choice.engine_key):
+                return await ctx.reply(
+                    f"> **❌Cannot use {engine_spec.display_name} because its dependency or "
+                    f"required API key is not configured.**\nTry `Auto` or another engine."
+                )
         if ctx.author.id in self.bot.translator and not ctx.author.id == 925597069748621353:
             return await ctx.send("> **❌You cannot translate two novels at a time.**", ephemeral=True)
         if not ctx.message.attachments and not file and messageid is None:
@@ -566,11 +576,6 @@ class Translate(commands.Cog):
                                   colour=discord.Colour.blurple())
             embed.set_thumbnail(url=avatar)
             embed.add_field(name="Translating to", value=language, inline=True)
-            embed.add_field(name="Engine", value=(
-                "Default" if engine_selector == "default" else
-                "Auto" if engine_selector == "auto" else
-                translation_registry.get_display_name(engine_selector)
-            ), inline=True)
             embed.add_field(name="From", value=original_Language, inline=True)
             embed.add_field(name="Size", value=f"{round(size / (1024 ** 2), 2)} MB", inline=True)
             embed.set_footer(text=f"Hint : {await Hints.get_single_hint()}", icon_url=await Hints.get_avatar())
@@ -602,7 +607,44 @@ class Translate(commands.Cog):
             await FileHandler.update_status(self.bot)
             if ctx.author.id != 925597069748621353:
                 task = asyncio.create_task(self.cc_prog(rep_msg, embed=embed, author_id=ctx.author.id, timer=len(asyncio.all_tasks())-1))
-            translate = Translator(self.bot, ctx.author.id, language, engine=engine_selector)
+
+            def _on_engine_switch(frm: str, to: str) -> None:
+                # Fired from `translator.manager.TranslationManager`, which
+                # may run on a worker-thread event loop (see
+                # utils.translate.Translator._translate_batch_with_retry) --
+                # hop back onto the bot's own loop to actually send anything.
+                frm_spec = engine_registry.get_spec(frm)
+                to_spec = engine_registry.get_spec(to)
+                frm_display = frm_spec.display_name if frm_spec else (frm or "engine")
+                to_display = to_spec.display_name if to_spec else to
+                coro = ctx.send(f"⚠️ {frm_display} failed.\n🔄 Switching to {to_display}...")
+                asyncio.run_coroutine_threadsafe(coro, self.bot.loop)
+
+            if engine_choice.is_auto:
+                await ctx.send("🔄 **Translation mode:** Auto (will pick a working engine automatically)")
+            else:
+                chosen_spec = engine_registry.get_spec(engine_choice.engine_key)
+                chosen_display = chosen_spec.display_name if chosen_spec else engine_choice.engine_key
+                await ctx.send(f"🔄 **Translating using:** {chosen_display}")
+
+            # One TranslationManager for the entire /translate job, even
+            # though large files build a fresh `Translator` wrapper per
+            # 1000-line chunk-batch below (see the comment on
+            # Translator.__init__) -- otherwise Auto mode's sticky engine
+            # and failed-engine tracking would silently reset every 1000
+            # lines instead of lasting the whole job.
+            from translator.manager import TranslationManager
+            shared_engine_manager = TranslationManager(
+                engine_mode=translation_engine,
+                on_engine_switch=_on_engine_switch,
+            )
+
+            translate = Translator(
+                self.bot, ctx.author.id, language,
+                engine_mode=translation_engine,
+                on_engine_switch=_on_engine_switch,
+                translation_manager=shared_engine_manager,
+            )
             if len(liz) < 1700:
                 story = await translate.start(liz, len(asyncio.all_tasks()))
                 # Clean any error messages from the translated story
@@ -622,7 +664,12 @@ class Translate(commands.Cog):
                 for liz_t in chunks:
                     cnt += 1
                     self.bot.translator[ctx.author.id] = f"0/{len(liz_t)}"
-                    translate = Translator(self.bot, ctx.author.id, language, engine=engine_selector)
+                    translate = Translator(
+                        self.bot, ctx.author.id, language,
+                        engine_mode=translation_engine,
+                        on_engine_switch=_on_engine_switch,
+                        translation_manager=shared_engine_manager,
+                    )
                     try:
                         pr_msg = await ctx.reply(
                             content=f"> Translating {str(cnt)} chunks out of {str(len(chunks))}... use .tp to "
@@ -687,23 +734,22 @@ class Translate(commands.Cog):
             return await FileHandler().distribute(self.bot, ctx, name, language, original_Language, rawname,
                                                   description,
                                                   thumbnail=thumbnail, library=library, novel_url=novel_url)
+        except TranslationFailedError as e:
+            if e.engine == "auto":
+                return await ctx.send(
+                    "❌ **Auto translation failed.**\n\n"
+                    "All available translation engines are currently unavailable."
+                )
+            spec = engine_registry.get_spec(e.engine)
+            display = spec.display_name if spec else (e.engine or "the selected engine")
+            return await ctx.send(
+                f"❌ **Translation failed using {display}.**\n\n"
+                f"The selected engine is currently unavailable.\n\n"
+                f"Please try again with:\n• Auto\n• another translation engine"
+            )
         except Exception as e:
             if "Translation stopped" in str(e):
                 return await ctx.send("Translation stopped")
-            elif isinstance(e, (TranslationFailedError, InvalidEngineError)):
-                return await ctx.send(
-                    f"> **❌ {e}**\n"
-                    f"The selected translation engine is currently unavailable.\n"
-                    f"Please try again with:\n"
-                    f"\u2022 Auto\n"
-                    f"\u2022 another translation engine"
-                )
-            elif isinstance(e, AllEnginesFailedError):
-                return await ctx.send(
-                    "> **❌ Auto translation failed.**\n"
-                    "All available translation engines are currently unavailable. "
-                    "Please try again later or select another engine."
-                )
             else:
                 print(e)
                 traceback.print_exc()
@@ -755,13 +801,16 @@ class Translate(commands.Cog):
             self, inter: discord.Interaction, current: str
     ) -> list[app_commands.Choice]:
         current_lower = (current or "").lower()
-        options = [("Default", "default"), ("Auto", "auto")]
-        options += [
-            (translation_registry.get_display_name(name), name)
-            for name in translation_registry.get_available_providers()
+        options: list[tuple[str, str]] = [
+            ("Auto (recommended)", "Auto"),
+            ("Default (admin-configured)", "Default"),
         ]
-        filtered = [pair for pair in options if current_lower in pair[0].lower()][:25]
-        return [app_commands.Choice(name=name, value=value) for name, value in filtered]
+        options += [(spec.display_name, spec.key) for spec in engine_registry.available_specs()]
+        return [
+            app_commands.Choice(name=name, value=value)
+            for name, value in options
+            if current_lower in name.lower() or current_lower in value.lower()
+        ][:25]
 
     async def cc_prog(self, msg: discord.Message, embed: discord.Embed, author_id: int, timer: int =8) -> typing.Optional[
         discord.Message]:

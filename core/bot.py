@@ -103,6 +103,10 @@ class Raizel(commands.Bot):
         await txt_channel.send(embed=discord.Embed(description=f"Bot is up now"))
         asyncio.create_task(self.startup(channel=channel))
         self.logger.info("Bot is up now")
+        try:
+            await self.tree.sync()
+        except Exception as e:
+            self.logger.error(f"Failed to sync command tree: {e}")
         return await super().setup_hook()
 
     async def write_healthcheck(self, status: str = "running"):
