@@ -20,6 +20,8 @@ from core import Raizel
 from core.views.linkview import LinkView
 from databases.blocked import User
 from databases.data import Novel
+from translation.config import settings as translation_settings
+from translation.registry import registry as translation_registry
 from utils.category import Categories
 from utils.hints import Hints
 
@@ -682,54 +684,47 @@ class Admin(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Error: {e}")
 
+
     @commands.has_role(1020638168237740042)
     @commands.hybrid_command(
-        help="Admin only: change the global default translation engine used by /translate's 'Default' option."
+        help="Admin only: change the bot-wide default translation engine (used by anyone who selects "
+             "'Default' on /translate)."
     )
     async def set_translation_engine(self, ctx: commands.Context, engine: str):
-        """Change the persisted default translation engine.
-               Parameters
-               ----------
-               ctx : commands.Context
-                   The interaction
-               engine :
-                    engine key, e.g. googletrans, deep_translator, bing
-               """
-        from translator import registry, settings
-
-        engine = (engine or "").strip().lower()
-        spec = registry.get_spec(engine)
-        if spec is None:
-            available = ", ".join(s.key for s in registry.available_specs()) or "none configured"
+        await ctx.defer()
+        engine_value = (engine or "").strip().lower()
+        if not translation_registry.is_provider_available(engine_value):
+            available = ", ".join(
+                translation_registry.get_display_name(name)
+                for name in translation_registry.get_available_providers()
+            ) or "none currently available"
             return await ctx.send(
-                f"❌ Unknown translation engine `{engine}`.\nAvailable engines: {available}"
+                f"> **❌ `{engine}` is not a valid/available translation engine.**\nAvailable: {available}"
             )
-        if not registry.is_engine_available(engine, use_cache=False):
-            return await ctx.send(
-                f"❌ Cannot select {spec.display_name} because its dependency or required "
-                f"API key is not configured."
-            )
-
-        settings.set_default_engine(engine)
-        if self.bot.logger:
+        # set_default_engine() does a small synchronous file write
+        # (json.dump + os.replace) -- push it off the event loop rather
+        # than blocking it, even though this command is rare/admin-only.
+        await asyncio.to_thread(translation_settings.set_default_engine, engine_value)
+        display = translation_registry.get_display_name(engine_value)
+        try:
             self.bot.logger.info(
-                f"Default translation engine changed engine={engine} by_user={ctx.author.id}"
+                f"Default translation engine changed to {engine_value} by {ctx.author.id}"
             )
-        await ctx.send(f"✅ Default translation engine changed to {spec.display_name}.")
+        except Exception:
+            pass
+        await ctx.send(f"✅ Default translation engine changed to **{display}**.")
 
     @set_translation_engine.autocomplete("engine")
     async def set_translation_engine_autocomplete(
             self, inter: discord.Interaction, current: str
     ) -> list[app_commands.Choice]:
-        from translator import registry
-
         current_lower = (current or "").lower()
-        choices = [
-            app_commands.Choice(name=spec.display_name, value=spec.key)
-            for spec in registry.available_specs()
-            if current_lower in spec.key.lower() or current_lower in spec.display_name.lower()
+        options = [
+            (translation_registry.get_display_name(name), name)
+            for name in translation_registry.get_available_providers()
         ]
-        return choices[:25]
+        filtered = [pair for pair in options if current_lower in pair[0].lower()][:25]
+        return [app_commands.Choice(name=name, value=value) for name, value in filtered]
 
 
 async def setup(bot):
