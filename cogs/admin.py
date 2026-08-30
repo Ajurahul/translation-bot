@@ -687,8 +687,7 @@ class Admin(commands.Cog):
 
     @commands.has_role(1020638168237740042)
     @commands.hybrid_command(
-        help="Admin only: change the bot-wide default translation engine (used by anyone who selects "
-             "'Default' on /translate)."
+        help="Admin only: change the bot-wide default translation engine"
     )
     async def set_translation_engine(self, ctx: commands.Context, engine: str):
         await ctx.defer()
