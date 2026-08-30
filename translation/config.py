@@ -28,12 +28,24 @@ DEFAULT_CONFIG: t.Dict[str, t.Any] = {
         "deep-mymemory",
         "translators-mymemory",
         "translators-yandex",
+        "translators-reverso",
+        "libretranslate",
+        "lingva",
     ],
     "retry_delays": [2, 4, 7],
     "request_delay": 0.2,
     "max_concurrency": 3,
     "provider_concurrency": {},
     "min_recoverable_chunk_chars": 120,
+    # Requests-per-minute cap, independent of max_concurrency -- see
+    # translation/ratelimit.py for why both are needed.
+    "requests_per_minute": 50,
+    "provider_requests_per_minute": {},
+    # Bot-wide cap on how many translation jobs run at the same time --
+    # see translation/jobs.py. This is the main lever for keeping a
+    # sudden burst of simultaneous /translate requests from overloading
+    # a resource-constrained host (threads, memory, outbound bandwidth).
+    "max_concurrent_jobs": 4,
 }
 
 
@@ -121,6 +133,31 @@ class TranslationSettings:
             return max(1, int(self._data.get("min_recoverable_chunk_chars", 120)))
         except (TypeError, ValueError):
             return 120
+
+    @property
+    def requests_per_minute(self) -> float:
+        try:
+            return max(1.0, float(self._data.get("requests_per_minute", 50)))
+        except (TypeError, ValueError):
+            return 50.0
+
+    @property
+    def provider_requests_per_minute(self) -> t.Dict[str, float]:
+        raw = self._data.get("provider_requests_per_minute") or {}
+        result = {}
+        for k, v in raw.items():
+            try:
+                result[k] = max(1.0, float(v))
+            except (TypeError, ValueError):
+                continue
+        return result
+
+    @property
+    def max_concurrent_jobs(self) -> int:
+        try:
+            return max(1, int(self._data.get("max_concurrent_jobs", 4)))
+        except (TypeError, ValueError):
+            return 4
 
 
 # Process-wide singleton used by the manager/registry/Discord cogs.

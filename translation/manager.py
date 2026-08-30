@@ -11,11 +11,13 @@ write-up):
   * Default          -> resolved from translation.config.settings once,
                          at job start; later admin changes don't affect
                          an already-running job.
-  * Auto             -> tries the configured order, remembers whichever
-                         engine first succeeds (`active_engine`) and
-                         reuses it for later calls in the same job.
-                         A `failed_engines` set is per-job only -- it is
-                         never written back to global/shared state.
+  * Auto             -> races every currently-available candidate
+                         concurrently and adopts whichever succeeds
+                         first (`active_engine`), reusing it directly
+                         for later calls in the same job without
+                         re-probing. A `failed_engines` set is per-job
+                         only -- it is never written back to
+                         global/shared state.
 """
 import asyncio
 import logging
@@ -29,6 +31,7 @@ from .errors import (
     InvalidEngineError,
     TranslationFailedError,
 )
+from .ratelimit import rate_limiters
 from .registry import ProviderRegistry
 from .registry import registry as global_registry
 from .retry import run_with_retries
@@ -45,6 +48,11 @@ MODE_EXPLICIT = "explicit"
 # "all engines failed -> reset -> retry" recovery in section 8/50 of the
 # spec bounded rather than looping forever.
 MAX_ALL_FAILED_RESETS = 1
+
+# Sentinel distinct from any real translation result (always a non-empty
+# str/list once validated) so "the race found nothing" can never be
+# confused with a legitimate falsy-ish result.
+_NO_WINNER = object()
 
 
 class JobState:
@@ -144,23 +152,61 @@ class TranslationManager:
                 TranslationManager._provider_semaphores[engine_name] = sem
         return sem
 
+    def _rate_limit_for(self, engine_name: str):
+        rate = self._settings.provider_requests_per_minute.get(
+            engine_name, self._settings.requests_per_minute
+        )
+        # Cap the initial burst well below the full per-minute budget --
+        # a bucket that lets an entire minute's quota fire instantly at
+        # job start (the default if burst == rate) can still trip a
+        # provider's own *shorter*-window rate limiting (many rate-limit
+        # per second or per 10 seconds, not just per minute), which
+        # defeats the point of having this limiter at all. Roughly a
+        # tenth of the per-minute rate, floored at 1, keeps a reasonable
+        # allowance for the first few chunks without permitting a
+        # thundering herd.
+        burst = max(1, int(rate // 10))
+        return rate_limiters.get(engine_name, rate, burst=burst)
+
+    @staticmethod
+    async def _shielded_blocking_wait(blocking_fn, release_fn=None) -> t.Any:
+        """Run a blocking `blocking_fn()` on a worker thread, safely under
+        cancellation. The underlying OS thread executing a blocking
+        acquire (threading.Semaphore.acquire / TokenBucket.acquire)
+        cannot be interrupted -- if the *caller* awaiting this gets
+        cancelled first, the thread keeps running and will eventually
+        succeed anyway. Shielding the inner task means our own
+        cancellation doesn't touch it; if we do get cancelled while
+        waiting, and a `release_fn` was given (used for the semaphore,
+        which has a real "give the permit back" step -- token buckets
+        don't, a wasted token just regenerates over time), it's called
+        once the background acquire actually lands, so a permit is never
+        silently lost."""
+        task = asyncio.ensure_future(asyncio.to_thread(blocking_fn))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if not task.done() and release_fn is not None:
+                task.add_done_callback(
+                    lambda fut: release_fn() if not fut.cancelled() and fut.exception() is None else None
+                )
+            raise
+
     async def _call_backend(self, engine_name: str, coro_factory) -> t.Any:
         backend = self._registry.get_provider(engine_name)
         sem = self._semaphore_for(engine_name)
-        # threading.Semaphore.acquire() blocks synchronously -- calling it
-        # directly here would stall the *entire* event loop (and every
-        # other coroutine sharing it) whenever the permit isn't
-        # immediately available, which can deadlock if the coroutine
-        # that would eventually release it is scheduled on that same
-        # loop. Routing the wait through asyncio.to_thread keeps the
-        # blocking part on a worker thread so the loop stays free to run
-        # other tasks (including the ones holding a permit) in the
-        # meantime. This matters for both usage patterns in this project:
-        # many chunks each in their own thread+loop (bounded_concurrency
-        # is then effectively "how many threads are in flight", capped
-        # process-wide per provider) and any future caller that awaits
-        # several translations concurrently on a single event loop.
-        await asyncio.to_thread(sem.acquire)
+        bucket = self._rate_limit_for(engine_name)
+
+        # Requests-per-minute cap first: this is what actually keeps a
+        # fast-responding provider from being hammered at a high rate
+        # even when max_concurrency is small (concurrency alone doesn't
+        # limit *rate*, only how many calls can be in flight at once --
+        # see translation/ratelimit.py).
+        await self._shielded_blocking_wait(bucket.acquire)
+
+        # Then the concurrency semaphore, which bounds "in flight at
+        # once" the same way it always has.
+        await self._shielded_blocking_wait(sem.acquire, release_fn=sem.release)
         try:
             return await coro_factory(backend)
         finally:
@@ -245,6 +291,72 @@ class TranslationManager:
         healthy = [e for e in order if e not in self.state.failed_engines]
         return [e for e in healthy if self._registry.is_provider_available(e)]
 
+    async def _discover_auto_engine(self, candidates: t.List[str], coro_factory, validator) -> t.Any:
+        """Try every given candidate *concurrently* and adopt whichever
+        succeeds first, cancelling the rest -- rather than waiting on
+        them one at a time in order. This only runs when there's no
+        already-proven-healthy `active_engine` to reuse (job start, or
+        right after the active engine just failed), so it costs one
+        extra burst of parallel requests at most once per "engine
+        needed" event, not per chunk -- every later chunk in the job
+        still goes straight to whichever engine won here.
+
+        Returns `_NO_WINNER` if every candidate in this race failed."""
+        if not candidates:
+            return _NO_WINNER
+
+        tasks = {
+            asyncio.ensure_future(self._try_engine_with_retry(engine, coro_factory, validator)): engine
+            for engine in candidates
+        }
+        pending = set(tasks)
+        winner_engine: t.Optional[str] = None
+        winner_result: t.Any = _NO_WINNER
+
+        try:
+            while pending and winner_engine is None:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                # Process every task that finished in this batch, not
+                # just the first one a set happens to yield -- iteration
+                # order of `done` is arbitrary, so stopping early could
+                # leave another already-finished loser's exception
+                # unretrieved (a real "Task exception was never
+                # retrieved" warning) and its failure unrecorded.
+                for task in done:
+                    engine = tasks[task]
+                    try:
+                        outcome = task.result()
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception as exc:
+                        self.mark_failed(engine)
+                        logger.info(
+                            "Provider failure provider=%s reason=%s mode=auto-race", engine, exc
+                        )
+                        continue
+                    if winner_engine is None:
+                        winner_engine = engine
+                        winner_result = outcome
+                    # Else: another candidate in the same batch also
+                    # succeeded -- keep the first one found and simply
+                    # discard this one; no further action needed since
+                    # it already ran to completion.
+        finally:
+            # Cancel whatever's still racing once we have a winner (or
+            # ran out of candidates) so we're not burning quota/requests
+            # on providers we no longer need, and drain them so their
+            # cancellation/exceptions don't surface as "Task exception
+            # was never retrieved" warnings later.
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+        if winner_engine is not None:
+            self.mark_success(winner_engine)
+            logger.info("Provider selected provider=%s mode=auto-race", winner_engine)
+        return winner_result
+
     async def _run_auto(self, coro_factory, validator) -> t.Any:
         # Reuse the already-proven-healthy engine first -- this is the
         # whole point of Auto: find a working provider once, then stop
@@ -257,37 +369,26 @@ class TranslationManager:
                 logger.info("Provider switched from=%s reason=%s", engine, exc)
                 self.mark_failed(engine)
 
-        last_exc: t.Optional[Exception] = None
+        # No proven-healthy engine right now -- race every currently
+        # available candidate concurrently and adopt whichever succeeds
+        # first, instead of trying them one at a time in order.
         for _pass in range(MAX_ALL_FAILED_RESETS + 1):
             candidates = self._auto_candidates()
-            if not candidates:
-                if self.state.all_failed_resets >= MAX_ALL_FAILED_RESETS:
-                    break
-                self.state.all_failed_resets += 1
-                self.state.failed_engines.clear()
-                continue
-
-            for engine in candidates:
-                try:
-                    result = await self._try_engine_with_retry(engine, coro_factory, validator)
-                    self.mark_success(engine)
-                    logger.info("Provider selected provider=%s mode=auto", engine)
+            if candidates:
+                result = await self._discover_auto_engine(candidates, coro_factory, validator)
+                if result is not _NO_WINNER:
                     return result
-                except Exception as exc:
-                    last_exc = exc
-                    self.mark_failed(engine)
-                    logger.info("Provider failure provider=%s reason=%s", engine, exc)
 
-            # Every candidate in this pass failed. Bounded reset: clear
-            # per-job failure state once and try a fresh pass, then stop.
+            # Either there were no candidates at all, or every one of
+            # them lost the race. Bounded reset: clear per-job failure
+            # state once and race a fresh pass (an outage might have
+            # been transient), then give up.
             if self.state.all_failed_resets >= MAX_ALL_FAILED_RESETS:
                 break
             self.state.all_failed_resets += 1
             self.state.failed_engines.clear()
 
-        raise AllEnginesFailedError(
-            "All available translation engines are currently unavailable"
-        ) from last_exc
+        raise AllEnginesFailedError("All available translation engines are currently unavailable")
 
     async def aclose(self) -> None:
         """No per-job resources to release -- provider backends are

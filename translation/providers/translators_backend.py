@@ -128,6 +128,12 @@ class TranslatorsApertiumBackend(_TranslatorsPackageBackend):
     provider_key = "apertium"
 
 
+class TranslatorsReversoBackend(_TranslatorsPackageBackend):
+    name = "translators-reverso"
+    display_name = "Translators - Reverso"
+    provider_key = "reverso"
+
+
 def register(reg) -> None:
     reg.register("translators-google", TranslatorsGoogleBackend, display_name="Translators - Google")
     reg.register("translators-bing", TranslatorsBingBackend, display_name="Translators - Bing")
@@ -137,4 +143,7 @@ def register(reg) -> None:
     reg.register("translators-yandex", TranslatorsYandexBackend, display_name="Translators - Yandex")
     reg.register(
         "translators-apertium", TranslatorsApertiumBackend, display_name="Translators - Apertium"
+    )
+    reg.register(
+        "translators-reverso", TranslatorsReversoBackend, display_name="Translators - Reverso"
     )

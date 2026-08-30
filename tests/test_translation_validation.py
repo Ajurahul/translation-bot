@@ -61,6 +61,20 @@ def test_batch_accepts_valid_translations():
     assert result == ["hello", "world"]
 
 
+def test_batch_rejects_length_mismatch_instead_of_silently_truncating():
+    # Regression test for a real bug found in review: zip(originals,
+    # cleaned) silently truncates to the shorter list, so a provider
+    # that dropped or duplicated an item would previously slide through
+    # as "success" with a result list that no longer lines up 1:1 with
+    # the input -- corrupting downstream chunk reassembly. A length
+    # mismatch must now be caught explicitly.
+    with pytest.raises(PermanentTranslationError):
+        validate_translation_batch(["a", "b", "c"], ["only one item back"])
+
+    with pytest.raises(PermanentTranslationError):
+        validate_translation_batch(["a"], ["one", "too many"])
+
+
 def test_batch_rejects_single_empty_item_when_original_non_empty():
     with pytest.raises(PermanentTranslationError):
         validate_translation_batch(["hola", "mundo"], ["hello", ""])

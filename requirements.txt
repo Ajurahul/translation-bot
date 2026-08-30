@@ -8,6 +8,7 @@ googletrans==4.0.2
 deep-translator==1.11.4
 translators
 langdetect
+httpx
 discord-ext-menus
 discord.py
 parsel==1.8.1

@@ -44,6 +44,20 @@ def validate_translation_batch(
         raise PermanentTranslationError("translation provider returned no response (None)")
 
     items = [str(x) for x in raw]
+    originals = list(originals)
+
+    # A provider that returns a different number of items than it was
+    # given is a data-integrity problem, not a cosmetic one: callers
+    # zip the result back up against the original chunk list (and, in
+    # utils/translate.py, against chunk *numbering* used to reassemble
+    # the final file) on the assumption the lists line up 1:1. Silently
+    # truncating via zip() here would let a provider that dropped or
+    # duplicated an item slide through as "success" and quietly corrupt
+    # the reassembled output -- catch it explicitly instead.
+    if len(items) != len(originals):
+        raise PermanentTranslationError(
+            f"translation provider returned {len(items)} item(s) for {len(originals)} input(s)"
+        )
 
     if not is_error_response(items):
         cleaned = items

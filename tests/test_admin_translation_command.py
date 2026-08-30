@@ -1,5 +1,3 @@
-from discord.ext import commands
-
 from cogs.admin import Admin
 
 ADMIN_ROLE_ID = 1020638168237740042
