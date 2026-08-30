@@ -911,7 +911,7 @@ class Crawler(commands.Cog):
         title_name = title_name.replace('_', ' ')
         original_Language = await FileHandler.find_language(text="title_name " + title_name, link=link)
         print("language detected : " + original_Language)
-        if original_Language != "english" and translate_to is None and add_terms is None:
+        if FileHandler.should_auto_translate(original_Language, translate_to, add_terms):
             translate_to = "eng_auto"
         if title_name == "" or title_name == "None" or title_name is None:
             title = f"{ctx.author.id}_crl"
@@ -1415,7 +1415,7 @@ class Crawler(commands.Cog):
         full_text = "Source : " + firstchplink + '\n\n'
         no_of_tries = 0
         original_Language = await FileHandler.find_language("title_name " + title)
-        if original_Language != "english" and translate_to is None and add_terms is None:
+        if FileHandler.should_auto_translate(original_Language, translate_to, add_terms):
             translate_to = "eng_auto"
         org_title = title
         if title is None or str(title).strip() == "" or title == "None":

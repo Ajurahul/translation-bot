@@ -11,6 +11,7 @@ import sys
 
 import aiofiles
 import discord
+from discord import app_commands
 from discord.ext import commands
 from mega import Mega
 
@@ -680,6 +681,55 @@ class Admin(commands.Cog):
                 await ctx.send(f"❌ Could not get latest commit: {result.stderr}")
         except Exception as e:
             await ctx.send(f"❌ Error: {e}")
+
+    @commands.has_role(1020638168237740042)
+    @commands.hybrid_command(
+        help="Admin only: change the global default translation engine used by /translate's 'Default' option."
+    )
+    async def set_translation_engine(self, ctx: commands.Context, engine: str):
+        """Change the persisted default translation engine.
+               Parameters
+               ----------
+               ctx : commands.Context
+                   The interaction
+               engine :
+                    engine key, e.g. googletrans, deep_translator, bing
+               """
+        from translator import registry, settings
+
+        engine = (engine or "").strip().lower()
+        spec = registry.get_spec(engine)
+        if spec is None:
+            available = ", ".join(s.key for s in registry.available_specs()) or "none configured"
+            return await ctx.send(
+                f"❌ Unknown translation engine `{engine}`.\nAvailable engines: {available}"
+            )
+        if not registry.is_engine_available(engine, use_cache=False):
+            return await ctx.send(
+                f"❌ Cannot select {spec.display_name} because its dependency or required "
+                f"API key is not configured."
+            )
+
+        settings.set_default_engine(engine)
+        if self.bot.logger:
+            self.bot.logger.info(
+                f"Default translation engine changed engine={engine} by_user={ctx.author.id}"
+            )
+        await ctx.send(f"✅ Default translation engine changed to {spec.display_name}.")
+
+    @set_translation_engine.autocomplete("engine")
+    async def set_translation_engine_autocomplete(
+            self, inter: discord.Interaction, current: str
+    ) -> list[app_commands.Choice]:
+        from translator import registry
+
+        current_lower = (current or "").lower()
+        choices = [
+            app_commands.Choice(name=spec.display_name, value=spec.key)
+            for spec in registry.available_specs()
+            if current_lower in spec.key.lower() or current_lower in spec.display_name.lower()
+        ]
+        return choices[:25]
 
 
 async def setup(bot):

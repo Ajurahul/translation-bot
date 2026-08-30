@@ -1,4 +1,5 @@
 import asyncio
+import os
 import threading
 try:
     from asyncio import Timeout
@@ -13,6 +14,18 @@ import typing as t
 
 from deep_translator import GoogleTranslator as DeepGoogleTranslator
 from googletrans import Translator as GoogleTransClient
+
+# The `translators` package (used for the Bing engine, and by the new
+# translator/backends/translators_pkg_engine.py for a few additional free
+# providers) tries to auto-detect the server's region over the network on
+# first import. If that lookup fails -- no route out, restrictive
+# firewall/proxy, offline dev box -- it falls back to an interactive
+# `input()` prompt, which hangs forever in any headless environment (a
+# Docker container, a CI runner, systemd with no TTY, ...). Setting this
+# env var before the import skips that detection entirely; it only picks
+# which server pool `translators` prefers, it does not restrict which
+# providers are reachable. Must be set before the import below.
+os.environ.setdefault("translators_default_region", "EN")
 
 try:
     import translators as bing_translators
@@ -80,11 +93,51 @@ class Translator:
     _engine_cooldown_until: t.Dict[str, float] = {}
     _engine_lock = threading.Lock()
 
-    def __init__(self, bot: Raizel, user: int, language: str) -> None:
+    def __init__(self, bot: Raizel, user: int, language: str,
+                 engine_mode: t.Optional[str] = None,
+                 on_engine_switch: t.Optional[t.Callable[[str, str], None]] = None,
+                 translation_manager: t.Optional["object"] = None) -> None:
         self.bot = bot
         self.user = user
         self.language = language
         self.order = {}
+        # `engine_mode` selects which of the new runtime-selectable
+        # translation engines to use ("auto", "default", or a concrete
+        # engine key like "googletrans"/"bing"/...). Leaving it as None
+        # (the default) preserves the exact legacy behaviour below --
+        # the fixed deep -> googletrans -> bing cascade with the
+        # class-level circuit breaker -- for every existing caller that
+        # doesn't know about engine selection (e.g. the bare
+        # `Translator.atranslate_with_retry(...)` calls used for
+        # title/description translation elsewhere in the bot).
+        self.engine_mode = engine_mode
+        self._on_engine_switch = on_engine_switch
+        # BUG FIX (found in review): large-file translation in
+        # cogs/translation.py deliberately builds a *new* `Translator`
+        # instance per 1000-line chunk-batch and `del`s the old one, to
+        # keep memory bounded across a big novel. If each new instance
+        # also lazily built its own fresh TranslationManager, Auto mode's
+        # "remember which engine works" state (and Explicit mode's
+        # unavailable-engine check) would silently reset every 1000
+        # lines instead of persisting for the whole /translate job --
+        # exactly the "re-probe every chunk" anti-pattern the spec
+        # forbids, just at chunk-batch granularity instead of per-chunk.
+        # Callers that span multiple Translator instances for one logical
+        # job (see cogs/translation.py) now build ONE TranslationManager
+        # up front and pass it in here explicitly; callers that only ever
+        # create a single Translator per job (the common case, and every
+        # existing caller) can keep leaving this as None and get a
+        # private manager built lazily, unchanged from before.
+        self._manager = translation_manager
+
+    def _get_manager(self):
+        if self._manager is None:
+            from translator.manager import TranslationManager
+            self._manager = TranslationManager(
+                engine_mode=self.engine_mode,
+                on_engine_switch=self._on_engine_switch,
+            )
+        return self._manager
 
     @classmethod
     def _is_engine_cooling_down(cls, engine: str) -> bool:
@@ -122,48 +175,22 @@ class Translator:
 
     @staticmethod
     def _is_error_500_response(translated: t.List[str]) -> bool:
-        """Detect if response is a Google Translate error page."""
-        if not translated:
-            return False
+        """Detect if response is a Google Translate error page.
 
-        joined = " ".join(str(part) for part in translated).lower()
-        joined = joined.replace("’", "'")
-
-        # Error page markers
-        error_indicators = (
-            "error 500",
-            "server error",
-            "that's an error",
-            "there was an error",
-            "please try again later",
-            "that's all we know",
-        )
-
-        # Count how many error indicators are present
-        marker_hits = sum(indicator in joined for indicator in error_indicators)
-
-        # If we see "error 500" OR multiple error markers, it's an error response
-        is_error = ("error 500" in joined) or (marker_hits >= 2)
-
-        return is_error
+        Delegates to `translator.errors.is_error_response`, the single
+        canonical implementation shared with the new engine backends, so
+        the detector only lives in one place (see translator/errors.py)."""
+        from translator.errors import is_error_response
+        return is_error_response(translated)
 
     @staticmethod
     def _filter_error_text(text: str) -> str:
-        """Remove error messages from text as a safety measure."""
-        if not text:
-            return text
+        """Remove error messages from text as a safety measure.
 
-        # Pattern to detect and remove error pages
-        error_patterns = [
-            r"Error 500.*?(?=\n[A-Za-zÀ-ÿ]|\Z)",  # Error 500 followed by actual text or end
-            r"(?:error|server error|that's an error|there was an error|please try again later).*?(?=\n[A-Za-zÀ-ÿ]|\Z)",
-        ]
-
-        result = text
-        for pattern in error_patterns:
-            result = re.sub(pattern, "", result, flags=re.IGNORECASE | re.DOTALL)
-
-        return result.strip()
+        Delegates to `translator.errors.filter_error_text` -- see
+        `_is_error_500_response` above."""
+        from translator.errors import filter_error_text
+        return filter_error_text(text)
 
     @staticmethod
     def _normalize_language(value: str, fallback: str = "en") -> str:
@@ -507,6 +534,15 @@ class Translator:
         )
 
     def _translate_batch_with_retry(self, chapter: t.List[str]) -> t.List[str]:
+        if self.engine_mode:
+            # New runtime-selectable-engine path (explicit engine, Default,
+            # or Auto). `translate()`/`translates()` below call this from
+            # ThreadPoolExecutor worker threads with no running event loop,
+            # exactly like the legacy path via `_run_async_blocking`.
+            manager = self._get_manager()
+            return self._run_async_blocking(
+                manager.translate_many, chapter, "auto", self.language,
+            )
         return self.translate_batch_with_retry(
             chapter=chapter,
             source="auto",
@@ -528,6 +564,21 @@ class Translator:
             translated = self._translate_batch_with_retry(chapter)
             translated = clean_parts(translated)
         except Exception as e:
+            if self.engine_mode:
+                # New-style engine selection (explicit engine, Default, or
+                # Auto): a `TranslationFailedError` here already means the
+                # manager exhausted retries (and, for a single overly-long
+                # chunk, its own char-level split/recovery -- section 17).
+                # Splitting the *chapter list* and retrying the same
+                # already-exhausted engine/pool would not help, and
+                # per Rule 1 we must not silently fall back to a
+                # different engine for an explicit selection -- so this
+                # propagates up as a hard failure instead of being
+                # swallowed into "couldn't translate this part"
+                # placeholder text the way the legacy cascade does below.
+                from translator.base import TranslationFailedError
+                if isinstance(e, TranslationFailedError):
+                    raise
             try:
                 if "text must be a valid text" in str(e):
                     for c in chapter[:]:  # Use slice to avoid modifying while iterating

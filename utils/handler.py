@@ -30,6 +30,7 @@ from core.bot import Raizel
 from core.views.linkview import LinkView
 from databases.data import Novel
 from languages import languages
+from translation.detection import detect_language_code
 from utils.category import Categories
 from utils.translate import Translator
 
@@ -395,6 +396,25 @@ class FileHandler:
         else:
             language = {i for i in lang if lang[i] == lang_code}
         return language.pop()
+
+    @staticmethod
+    @staticmethod
+    def should_auto_translate(original_language, translate_to=None, add_terms=None) -> bool:
+        """Whether the crawler should kick off an automatic
+        translate-to-English pass after detecting a novel's language.
+
+        A source language must have actually been *detected* -- "NA"
+        (detection failed/inconclusive) must never trigger an automatic
+        translation, since we're not confident the novel isn't already
+        in English (or any other language the caller might want left
+        alone). Only fires when the caller hasn't already picked a
+        target language or term set."""
+        if translate_to is not None or add_terms is not None:
+            return False
+        if original_language is None:
+            return False
+        normalized = str(original_language).strip().lower()
+        return normalized not in ("english", "en", "na", "")
 
     @staticmethod
     async def find_language(text: str, link: str = None) -> str:
