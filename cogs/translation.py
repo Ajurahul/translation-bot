@@ -90,7 +90,7 @@ class Translate(commands.Cog):
         reason = f" — {result.reason}" if result.reason else ""
         return f"{prefix}{reason}"
 
-    @commands.is_owner()
+    @commands.has_role(1020638168237740042)
     @commands.hybrid_command(
         name="enginecheck",
         help="Owner only: runs a live health check against every translation engine.",
