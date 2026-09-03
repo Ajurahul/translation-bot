@@ -1,7 +1,10 @@
 import asyncio
 import gc
 import os
-
+import httpcore
+# Dynamically add the missing type hint variable so googletrans doesn't crash
+if not hasattr(httpcore, 'SyncHTTPTransport'):
+    httpcore.SyncHTTPTransport = None
 import discord
 from discord.ext import commands
 from discord.ext import tasks
