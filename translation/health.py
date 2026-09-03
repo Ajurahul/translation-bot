@@ -125,12 +125,33 @@ async def run_health_check(
 ) -> t.List[EngineCheckResult]:
     """Probe every registered engine with one tiny real translation --
     including ones already session-disabled, so recovery gets detected
-    and not just new failures. Probes run concurrently; one slow/hanging
-    provider can't hold the others up (see PROBE_TIMEOUT_SECONDS)."""
+    and not just new failures. Probes are run one at a time to avoid
+    spawning many concurrent network requests and background threads
+    during startup."""
+
     reg = registry or global_registry
     names = reg.all_registered()
-    results = await asyncio.gather(*(_probe_one(reg, name) for name in names))
-    return list(results)
+
+    results: t.List[EngineCheckResult] = []
+
+    for name in names:
+        try:
+            results.append(await _probe_one(reg, name))
+        except Exception:
+            logger.exception("Unexpected error while probing translation engine '%s'", name)
+
+            results.append(
+                EngineCheckResult(
+                    engine=name,
+                    label=reg.get_display_name(name),
+                    configured=False,
+                    ok=False,
+                    changed=False,
+                    reason="health check crashed",
+                )
+            )
+
+    return results
 
 
 def status_snapshot(registry: t.Optional[ProviderRegistry] = None) -> t.List[dict]:

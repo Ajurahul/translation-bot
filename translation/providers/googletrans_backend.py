@@ -27,6 +27,7 @@ call) without ever reusing loop-bound internals across a closed loop.
 import asyncio
 import typing as t
 import threading
+import inspect
 
 import httpx
 
@@ -68,6 +69,19 @@ class GoogleTransBackend(TranslationBackend):
         requires_api_key=False, free_without_key=True, supports_batch=True
     )
 
+
+
+    async def _call_translate(self, client, text, src, dest):
+        result = client.translate(text, src=src, dest=dest)
+
+        if inspect.isawaitable(result):
+            return await asyncio.wait_for(
+                result,
+                timeout=self._call_timeout,
+            )
+
+        return result
+
     def __init__(self, call_timeout: float = CALL_TIMEOUT_SECONDS) -> None:
         self._client = None
         self._client_loop = None
@@ -98,17 +112,7 @@ class GoogleTransBackend(TranslationBackend):
 
         with self._lock:
             if self._client is None or self._client_loop is not loop:
-                # googletrans' Translator.__init__ expects an
-                # httpx.Timeout (it assigns it straight to the
-                # underlying httpx.AsyncClient's .timeout) -- NOT
-                # asyncio.Timeout/async_timeout.Timeout, which is an
-                # unrelated async-context-manager type with a different
-                # constructor signature. Passing the wrong one either
-                # crashes here (older Python + async_timeout versions
-                # whose Timeout requires a `loop` arg) or silently
-                # corrupts the client's timeout handling (newer Python,
-                # where asyncio.Timeout(15.0) constructs without error
-                # but isn't what httpx expects at all).
+
                 self._client = _GoogleTransClient(
                     timeout=httpx.Timeout(15.0),
                     raise_exception=True,
@@ -120,9 +124,11 @@ class GoogleTransBackend(TranslationBackend):
     async def translate(self, text: str, source_language: str, target_language: str) -> str:
         client = await self._get_client()
         try:
-            result = await asyncio.wait_for(
-                client.translate(str(text), dest=target_language, src=source_language),
-                timeout=self._call_timeout,
+            result = await self._call_translate(
+                client,
+                str(text),
+                source_language,
+                target_language,
             )
         except asyncio.TimeoutError as exc:
             raise TransientTranslationError("googletrans timed out") from exc
@@ -135,9 +141,11 @@ class GoogleTransBackend(TranslationBackend):
     ) -> t.List[str]:
         client = await self._get_client()
         try:
-            result = await asyncio.wait_for(
-                client.translate(list(texts), dest=target_language, src=source_language),
-                timeout=self._call_timeout,
+            result = await self._call_translate(
+                client,
+                list(texts),
+                source_language,
+                target_language,
             )
         except asyncio.TimeoutError as exc:
             raise TransientTranslationError("googletrans timed out") from exc
