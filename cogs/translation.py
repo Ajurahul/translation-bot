@@ -90,10 +90,10 @@ class Translate(commands.Cog):
         reason = f" — {result.reason}" if result.reason else ""
         return f"{prefix}{reason}"
 
-    @commands.has_role(1020638168237740042)
+    # @commands.has_role(1020638168237740042)
     @commands.hybrid_command(
         name="enginecheck",
-        help="Owner only: runs a live health check against every translation engine.",
+        help="runs a live health check against every translation engine.",
     )
     async def enginecheck(self, ctx: commands.Context) -> None:
         await ctx.defer()
