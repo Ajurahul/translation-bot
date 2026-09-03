@@ -51,6 +51,43 @@ that `deep-mymemory` now handles for you:
   treated as a real failure instead of being passed through as garbled
   output.
 
+### A note on flaky/dead public mirrors
+
+Several of the free engines above depend on a third party's public
+mirror rather than an official paid API, and those go down or move
+without notice. As of this doc:
+
+- **LibreTranslate**'s old default host, `translate.argosopentech.com`,
+  is decommissioned — the default here now points at
+  `translate.terraprint.co` instead. Override with `LIBRETRANSLATE_URL`
+  if that one goes down too.
+- **Lingva**'s own official instance, `lingva.ml`, has been unreliable
+  (Cloudflare 523s, and more recently a bot-abuse lockdown requiring a
+  key on the public instance) — the default here now points at
+  `lingva.lunar.icu`, per the project's own current instance list.
+  Override with `LINGVA_URL` if that one goes down too — see
+  <https://github.com/thedaviddelta/lingva-translate/blob/main/instances.json>
+  for currently-known instances.
+- **`translators-bing`** needs a JavaScript runtime (e.g. Node.js)
+  installed and on the host's `PATH` — the `translators` package shells
+  out to one for Bing's signature generation. If Node.js isn't
+  installed, this engine will show as failing in `.enginecheck` with
+  "Could not find an available JavaScript runtime" even though the
+  Python package itself is fine.
+- **`translators-apertium`** and **`translators-reverso`** can also show
+  as failing in `.enginecheck` for reasons outside this bot's control:
+  Apertium's code table is scraped live by the `translators` package and
+  doesn't line up with this bot's plain 2-letter codes (it wants e.g.
+  `"spa"`, not `"es"`) with no static table shipped to correct it here;
+  Reverso's failures come from that same package's HTML scraper for
+  reverso.net breaking, not from this bot's wrapper. Both are exactly
+  the kind of thing `.enginecheck`/the startup health check exist to
+  catch — Auto mode just skips them and uses one of the many other
+  free engines instead.
+
+`.enginecheck` (see below) is the fastest way to check current status
+of any of these rather than assuming this doc stays perfectly in sync.
+
 ### LibreTranslate: free by default, pointable at your own instance
 
 `libretranslate` talks to a public LibreTranslate mirror with no key

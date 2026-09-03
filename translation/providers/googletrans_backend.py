@@ -28,10 +28,7 @@ import asyncio
 import typing as t
 import threading
 
-try:
-    from asyncio import Timeout
-except ImportError:  # Python < 3.11
-    from async_timeout import Timeout
+import httpx
 
 from ..base import ProviderCapabilities, TranslationBackend
 from ..errors import PermanentTranslationError, TransientTranslationError
@@ -101,8 +98,19 @@ class GoogleTransBackend(TranslationBackend):
 
         with self._lock:
             if self._client is None or self._client_loop is not loop:
+                # googletrans' Translator.__init__ expects an
+                # httpx.Timeout (it assigns it straight to the
+                # underlying httpx.AsyncClient's .timeout) -- NOT
+                # asyncio.Timeout/async_timeout.Timeout, which is an
+                # unrelated async-context-manager type with a different
+                # constructor signature. Passing the wrong one either
+                # crashes here (older Python + async_timeout versions
+                # whose Timeout requires a `loop` arg) or silently
+                # corrupts the client's timeout handling (newer Python,
+                # where asyncio.Timeout(15.0) constructs without error
+                # but isn't what httpx expects at all).
                 self._client = _GoogleTransClient(
-                    timeout=Timeout(15.0),
+                    timeout=httpx.Timeout(15.0),
                     raise_exception=True,
                     service_urls=SERVICE_URLS,
                 )

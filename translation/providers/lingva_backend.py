@@ -9,6 +9,13 @@ which is why it's included alongside the translators-package providers.
 
 Like the translators-package providers, this is an unofficial/community
 endpoint and can change or go down without notice -- there's no SLA.
+(The project's own official instance, lingva.ml, has itself been
+unreliable -- Cloudflare 523s and, more recently, bot-abuse lockdowns
+requiring an API key on the public instance. lingva.lunar.icu is used
+as the default here instead, per the project's own current instance
+list at github.com/thedaviddelta/lingva-translate/blob/main/instances.json
+-- but community instances rotate; if this one goes down too, set
+LINGVA_URL to a current one from that list, or self-host.)
 """
 import os
 import urllib.parse
@@ -16,7 +23,7 @@ import urllib.parse
 from ..base import ProviderCapabilities, TranslationBackend
 from .http_backend import HttpJsonBackend
 
-DEFAULT_BASE_URL = "https://lingva.ml/api/v1"
+DEFAULT_BASE_URL = "https://lingva.lunar.icu/api/v1"
 
 
 class LingvaBackend(HttpJsonBackend, TranslationBackend):

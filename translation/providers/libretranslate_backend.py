@@ -11,12 +11,16 @@ Uses a public community mirror by default (no key needed there today).
 Configurable via environment variables so an operator can point this at
 their own self-hosted instance or a mirror that does require a key:
 
-    LIBRETRANSLATE_URL      - base URL (default: https://translate.argosopentech.com)
+    LIBRETRANSLATE_URL      - base URL (default: https://translate.terraprint.co)
     LIBRETRANSLATE_API_KEY  - optional; sent only if set
 
 Like the other community-mirror-backed providers here, this is an
 unofficial dependency on a third party's uptime/policy and can change
-without notice.
+without notice. (translate.argosopentech.com, an earlier default for
+this exact mirror across several LibreTranslate client libraries, has
+been decommissioned -- terraprint.co is its documented replacement. If
+this one goes down too, just set LIBRETRANSLATE_URL to whatever's
+current; no code change needed.)
 """
 import os
 import typing as t
@@ -25,7 +29,7 @@ from ..base import ProviderCapabilities, TranslationBackend
 from ..errors import PermanentTranslationError, TransientTranslationError
 from .http_backend import HttpJsonBackend
 
-DEFAULT_BASE_URL = "https://translate.argosopentech.com"
+DEFAULT_BASE_URL = "https://translate.terraprint.co"
 
 
 class LibreTranslateBackend(HttpJsonBackend, TranslationBackend):

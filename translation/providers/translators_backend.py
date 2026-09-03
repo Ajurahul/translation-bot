@@ -18,6 +18,21 @@ import typing as t
 
 from ..base import ProviderCapabilities, TranslationBackend
 from ..errors import PermanentTranslationError, TransientTranslationError
+from . import language_map
+
+try:
+    # The `translators` package's own myMemory wrapper hits the exact
+    # same public MyMemory HTTP API that deep-translator's
+    # MyMemoryTranslator does, and expects the same region-tagged codes
+    # ("af-ZA", "ko-KR", ...) rather than plain 2-letter ones -- so the
+    # already-verified MY_MEMORY_LANGUAGES_TO_CODES table is reused here
+    # via the shared language_map helper instead of hand-rolling a
+    # second one. (Unlike Apertium below, this mapping isn't a guess --
+    # deep-translator's table was checked directly against the codes
+    # `translators` itself reported as valid in a real failure.)
+    from deep_translator.constants import MY_MEMORY_LANGUAGES_TO_CODES
+except ImportError:  # pragma: no cover - exercised only when dependency missing
+    MY_MEMORY_LANGUAGES_TO_CODES = {}
 
 try:
     # `translators` probes the network at import time to pick a server
@@ -68,10 +83,15 @@ class _TranslatorsPackageBackend(TranslationBackend):
         return True
 
     def _code(self, value: str) -> str:
-        overrides = _LANGUAGE_OVERRIDES.get(self.provider_key, {})
         if not value or value == "auto":
             return "auto"
-        return overrides.get(value.lower(), value)
+        low = value.lower()
+        if self.provider_key == "myMemory":
+            return language_map.map_language_code(
+                "translators-mymemory", low, lambda: MY_MEMORY_LANGUAGES_TO_CODES
+            )
+        overrides = _LANGUAGE_OVERRIDES.get(self.provider_key, {})
+        return overrides.get(low, value)
 
     async def translate(self, text: str, source_language: str, target_language: str) -> str:
         if not self.is_available():
@@ -105,6 +125,13 @@ class TranslatorsGoogleBackend(_TranslatorsPackageBackend):
 
 
 class TranslatorsBingBackend(_TranslatorsPackageBackend):
+    # Needs a JavaScript runtime (e.g. Node.js) on the host's PATH --
+    # `translators` shells out to one via PyExecJS for Bing's signature
+    # generation. That's a deployment requirement, not something fixable
+    # from here in pure Python; if it's missing, is_available() still
+    # reports True (the Python package itself is installed) but every
+    # real call/health-check will fail until a JS runtime is installed.
+    # See docs/TRANSLATION_ENGINES.md.
     name = "translators-bing"
     display_name = "Translators - Bing"
     provider_key = "bing"
@@ -123,12 +150,32 @@ class TranslatorsYandexBackend(_TranslatorsPackageBackend):
 
 
 class TranslatorsApertiumBackend(_TranslatorsPackageBackend):
+    # KNOWN LIMITATION: `translators` builds Apertium's language_map
+    # dynamically by scraping Apertium's own site at call time rather
+    # than shipping a static table (unlike MyMemory/Bing above), and the
+    # codes it ends up expecting don't match this bot's plain 2-letter
+    # codes -- e.g. it wants "spa", not "es" (confirmed from a real
+    # failure's reported valid-code list). A static override table isn't
+    # included here despite that: without live access to re-verify
+    # Apertium's current scraped list, hand-writing one risks silently
+    # mapping to the wrong language rather than just failing loudly the
+    # way it does today. This engine will show as failing in
+    # `.enginecheck` until someone verifies the current code list
+    # against a live environment and adds it to _LANGUAGE_OVERRIDES.
     name = "translators-apertium"
     display_name = "Translators - Apertium"
     provider_key = "apertium"
 
 
 class TranslatorsReversoBackend(_TranslatorsPackageBackend):
+    # KNOWN LIMITATION: failures here (typically a scraping regex not
+    # matching, e.g. "'NoneType' object has no attribute 'group'") come
+    # from inside the third-party `translators` package's HTML-scraping
+    # implementation for reverso.net, not this wrapper -- there's no
+    # code fix available here short of patching that dependency. This is
+    # exactly the kind of flaky third-party integration the health check
+    # (.enginecheck / cog_load) exists to catch before a real job hits
+    # it, rather than a bug to chase in this file.
     name = "translators-reverso"
     display_name = "Translators - Reverso"
     provider_key = "reverso"
