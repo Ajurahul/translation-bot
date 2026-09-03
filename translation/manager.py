@@ -18,18 +18,31 @@ write-up):
                          re-probing. A `failed_engines` set is per-job
                          only -- it is never written back to
                          global/shared state.
+
+A quota/rate-limit failure (detected via translation.errors.is_quota_error)
+is the one exception to "per-job only": it also session-disables the
+engine process-wide via translation.health, since retrying an exhausted
+daily quota every few minutes is never going to succeed until the bot
+restarts or a health check proves otherwise (translation/health.py).
+_auto_candidates() excludes session-disabled engines from Auto's race.
+
+Each instance also tracks how many chunks each engine actually
+translated (`.usage`) -- see utils/translate.py's Translator, which
+aggregates this across every manager instance a job touches.
 """
 import asyncio
 import logging
 import threading
 import typing as t
 
+from . import health as _health
 from .config import TranslationSettings
 from .config import settings as global_settings
 from .errors import (
     AllEnginesFailedError,
     InvalidEngineError,
     TranslationFailedError,
+    is_quota_error,
 )
 from .ratelimit import rate_limiters
 from .registry import ProviderRegistry
@@ -92,6 +105,14 @@ class TranslationManager:
         self.state = JobState(mode=mode, explicit_engine=explicit_engine)
         if mode == MODE_DEFAULT:
             self.state.resolved_default_engine = self._resolve_default_engine()
+
+        # Per-job engine-usage tracking (how many chunks each engine
+        # actually translated) -- see utils/translate.py's Translator,
+        # which aggregates this across every TranslationManager a job
+        # touches (a long novel may be split across several) into one
+        # final human-readable summary.
+        self._usage_counts: t.Dict[str, int] = {}
+        self._usage_lock = threading.Lock()
 
     # -- selector parsing / default resolution ------------------------
     @staticmethod
@@ -230,6 +251,7 @@ class TranslationManager:
         return await self._run(
             coro_factory=lambda backend: backend.translate(text, source_language, target_language),
             validator=lambda raw: validate_translation(text, raw),
+            usage_count=1,
         )
 
     async def translate_batch(
@@ -240,6 +262,7 @@ class TranslationManager:
                 texts, source_language, target_language
             ),
             validator=lambda raw: validate_translation_batch(texts, raw),
+            usage_count=max(1, len(texts)),
         )
 
     def mark_success(self, engine: str) -> None:
@@ -254,42 +277,82 @@ class TranslationManager:
     def get_available_engines(self) -> t.List[str]:
         return self._registry.get_available_providers()
 
-    # -- mode dispatch ------------------------------------------------
-    async def _run(self, coro_factory, validator) -> t.Any:
-        if self.state.mode == MODE_EXPLICIT:
-            return await self._run_explicit(coro_factory, validator)
-        if self.state.mode == MODE_DEFAULT:
-            return await self._run_default(coro_factory, validator)
-        return await self._run_auto(coro_factory, validator)
+    def record_usage(self, engine: str, count: int = 1) -> None:
+        with self._usage_lock:
+            self._usage_counts[engine] = self._usage_counts.get(engine, 0) + count
 
-    async def _run_explicit(self, coro_factory, validator) -> t.Any:
+    @property
+    def usage(self) -> t.Dict[str, int]:
+        """How many chunks each engine actually translated in this job
+        so far. Thread-safe snapshot copy."""
+        with self._usage_lock:
+            return dict(self._usage_counts)
+
+    @staticmethod
+    def _note_if_quota_failure(engine: str, exc: Exception) -> None:
+        """A quota/rate-limit failure (as opposed to an ordinary
+        transient one) means retrying this engine again in a few minutes
+        is pointless -- it's out until a health check proves otherwise.
+        See translation/health.py's module docstring for why this is a
+        session-wide disable rather than a per-job failure."""
+        if is_quota_error(exc):
+            _health.mark_session_disabled(engine, str(exc))
+            logger.info("Provider quota/rate-limit hit, session-disabling provider=%s", engine)
+
+    # -- mode dispatch ------------------------------------------------
+    async def _run(self, coro_factory, validator, usage_count: int = 1) -> t.Any:
+        if self.state.mode == MODE_EXPLICIT:
+            return await self._run_explicit(coro_factory, validator, usage_count)
+        if self.state.mode == MODE_DEFAULT:
+            return await self._run_default(coro_factory, validator, usage_count)
+        return await self._run_auto(coro_factory, validator, usage_count)
+
+    async def _run_explicit(self, coro_factory, validator, usage_count: int = 1) -> t.Any:
         engine = self.state.explicit_engine
         if not self._registry.is_provider_available(engine):
             raise InvalidEngineError(f"Translation engine '{engine}' is not available")
         try:
             result = await self._try_engine_with_retry(engine, coro_factory, validator)
             self.mark_success(engine)
+            self.record_usage(engine, usage_count)
             return result
         except Exception as exc:
+            self._note_if_quota_failure(engine, exc)
             raise TranslationFailedError(
                 f"Translation failed using {self._registry.get_display_name(engine)}"
             ) from exc
 
-    async def _run_default(self, coro_factory, validator) -> t.Any:
+    async def _run_default(self, coro_factory, validator, usage_count: int = 1) -> t.Any:
         engine = self.state.resolved_default_engine
         try:
             result = await self._try_engine_with_retry(engine, coro_factory, validator)
             self.mark_success(engine)
+            self.record_usage(engine, usage_count)
             return result
         except Exception as exc:
+            self._note_if_quota_failure(engine, exc)
             raise TranslationFailedError(
                 f"Translation failed using {self._registry.get_display_name(engine)}"
             ) from exc
 
     def _auto_candidates(self) -> t.List[str]:
-        order = self._settings.auto_engine_order or self._registry.get_available_providers()
+        order = list(self._settings.auto_engine_order) or list(
+            self._registry.get_available_providers()
+        )
+        # Safety net: an engine that's registered but missing from a
+        # (possibly stale, e.g. persisted before it existed)
+        # auto_engine_order still gets a chance in Auto mode, appended
+        # after the configured order, rather than silently never being
+        # tried.
+        for name in self._registry.all_registered():
+            if name not in order:
+                order.append(name)
         healthy = [e for e in order if e not in self.state.failed_engines]
-        return [e for e in healthy if self._registry.is_provider_available(e)]
+        return [
+            e
+            for e in healthy
+            if self._registry.is_provider_available(e) and not _health.is_session_disabled(e)
+        ]
 
     async def _discover_auto_engine(self, candidates: t.List[str], coro_factory, validator) -> t.Any:
         """Try every given candidate *concurrently* and adopt whichever
@@ -330,6 +393,7 @@ class TranslationManager:
                         continue
                     except Exception as exc:
                         self.mark_failed(engine)
+                        self._note_if_quota_failure(engine, exc)
                         logger.info(
                             "Provider failure provider=%s reason=%s mode=auto-race", engine, exc
                         )
@@ -357,17 +421,20 @@ class TranslationManager:
             logger.info("Provider selected provider=%s mode=auto-race", winner_engine)
         return winner_result
 
-    async def _run_auto(self, coro_factory, validator) -> t.Any:
+    async def _run_auto(self, coro_factory, validator, usage_count: int = 1) -> t.Any:
         # Reuse the already-proven-healthy engine first -- this is the
         # whole point of Auto: find a working provider once, then stop
         # probing every engine on every subsequent chunk.
         if self.state.active_engine and self.state.active_engine not in self.state.failed_engines:
             engine = self.state.active_engine
             try:
-                return await self._try_engine_with_retry(engine, coro_factory, validator)
+                result = await self._try_engine_with_retry(engine, coro_factory, validator)
+                self.record_usage(engine, usage_count)
+                return result
             except Exception as exc:
                 logger.info("Provider switched from=%s reason=%s", engine, exc)
                 self.mark_failed(engine)
+                self._note_if_quota_failure(engine, exc)
 
         # No proven-healthy engine right now -- race every currently
         # available candidate concurrently and adopt whichever succeeds
@@ -377,6 +444,8 @@ class TranslationManager:
             if candidates:
                 result = await self._discover_auto_engine(candidates, coro_factory, validator)
                 if result is not _NO_WINNER:
+                    if self.state.active_engine:
+                        self.record_usage(self.state.active_engine, usage_count)
                     return result
 
             # Either there were no candidates at all, or every one of

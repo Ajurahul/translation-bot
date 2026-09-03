@@ -22,6 +22,8 @@ from core.bot import Raizel
 from core.views.ButtonView import ButtonsV
 from core.views.linkview import LinkView
 from languages.terms import terms
+from translation import health as translation_health
+from translation.config import settings as translation_settings
 from translation.errors import AllEnginesFailedError, InvalidEngineError, TranslationFailedError
 from translation.jobs import job_limiter
 from translation.registry import registry as translation_registry
@@ -41,6 +43,82 @@ def term_raw(text, term_dict):
 class Translate(commands.Cog):
     def __init__(self, bot: Raizel) -> None:
         self.bot = bot
+
+    async def cog_load(self) -> None:
+        # One tiny real translation through every configured engine
+        # (including already-disabled ones, to detect recovery) so a
+        # dead/expired key or an engine that's been down since the last
+        # restart gets caught at startup rather than mid-job. Fired as a
+        # background task -- and translation_health.run_startup_check()
+        # itself never raises -- so a slow provider or an unexpected
+        # error here can never delay or crash cog loading.
+        asyncio.create_task(translation_health.run_startup_check())
+
+    @staticmethod
+    def _initial_engine_label(engine_selector: str) -> str:
+        """What to show in the "Engine" field before/while a job is
+        translating -- updated to the real per-job usage summary (see
+        Translator.get_job_usage_summary) once the job finishes."""
+        if engine_selector == "default":
+            default_engine = translation_settings.default_engine
+            if translation_registry.is_provider_available(default_engine):
+                return f"Default ({translation_registry.get_display_name(default_engine)})"
+            return "Default"
+        if engine_selector == "auto":
+            # Auto mode races every available engine per job rather than
+            # sticking to one "preferred" engine, so there's nothing
+            # concrete to name yet -- the field is updated with the real
+            # winner(s) once the job completes.
+            return "Auto (selecting...)"
+        return translation_registry.get_display_name(engine_selector)
+
+    @staticmethod
+    def _engine_check_icon(result) -> str:
+        if not result.configured:
+            return "⚪"
+        if result.ok:
+            return "🟢" if result.changed else "✅"
+        return "🔴" if result.changed else "🟥"
+
+    @staticmethod
+    def _engine_check_detail(result) -> str:
+        if not result.configured:
+            return "not configured"
+        if result.ok:
+            return "recovered, back in rotation" if result.changed else "working"
+        prefix = "newly failed" if result.changed else "still disabled"
+        reason = f" — {result.reason}" if result.reason else ""
+        return f"{prefix}{reason}"
+
+    @commands.is_owner()
+    @commands.hybrid_command(
+        name="enginecheck",
+        help="Owner only: runs a live health check against every translation engine.",
+    )
+    async def enginecheck(self, ctx: commands.Context) -> None:
+        await ctx.defer()
+        results = await translation_health.run_health_check()
+        default_engine = translation_settings.default_engine
+
+        lines = []
+        for result in results:
+            icon = self._engine_check_icon(result)
+            detail = self._engine_check_detail(result)
+            marker = " *(default)*" if result.engine == default_engine else ""
+            lines.append(f"{icon} **{result.label}**{marker} — {detail}")
+
+        embed = discord.Embed(
+            title="🩺 Translation Engine Check",
+            description="\n".join(lines) or "No translation engines are registered.",
+            colour=discord.Colour.blurple(),
+        )
+        embed.add_field(
+            name="Your most recent job used",
+            value=Translator.get_job_usage_summary(ctx.author.id),
+            inline=False,
+        )
+        embed.set_footer(text="🟢 recovered · ✅ working · 🔴 newly failed · 🟥 still disabled · ⚪ not configured")
+        await ctx.send(embed=embed)
 
     @commands.hybrid_command(
         help="Gives progress of novel translation.", aliases=["now", "n", "p"]
@@ -567,11 +645,7 @@ class Translate(commands.Cog):
                                   colour=discord.Colour.blurple())
             embed.set_thumbnail(url=avatar)
             embed.add_field(name="Translating to", value=language, inline=True)
-            embed.add_field(name="Engine", value=(
-                "Default" if engine_selector == "default" else
-                "Auto" if engine_selector == "auto" else
-                translation_registry.get_display_name(engine_selector)
-            ), inline=True)
+            embed.add_field(name="Engine", value=self._initial_engine_label(engine_selector), inline=True)
             embed.add_field(name="From", value=original_Language, inline=True)
             embed.add_field(name="Size", value=f"{round(size / (1024 ** 2), 2)} MB", inline=True)
             embed.set_footer(text=f"Hint : {await Hints.get_single_hint()}", icon_url=await Hints.get_avatar())
@@ -600,6 +674,10 @@ class Translate(commands.Cog):
                 insert += random.randint(100, 250)
             liz.append(f"\n\n for more novels ({random.randint(1000, 200000)})join: https://discord.gg/SZxTKASsHq\n")
             self.bot.translator[ctx.author.id] = f"0/{len(liz)}"
+            # Fresh slate for this job's engine-usage tracking (see
+            # Translator.get_job_usage_summary) -- must happen before any
+            # Translator instance for this job is constructed below.
+            Translator.reset_job_usage(ctx.author.id)
             await FileHandler.update_status(self.bot)
             if ctx.author.id != 925597069748621353:
                 task = asyncio.create_task(self.cc_prog(rep_msg, embed=embed, author_id=ctx.author.id, timer=len(asyncio.all_tasks())-1))
@@ -671,10 +749,16 @@ class Translate(commands.Cog):
                     del chunks
                 except:
                     pass
+            engine_summary = Translator.get_job_usage_summary(ctx.author.id)
             try:
                 task.cancel()
                 view = None
-                embed.set_field_at(index=3,
+                # Field indices: 0 Translating to, 1 Engine, 2 From,
+                # 3 Size, 4 Progress (added by cc_prog after these four
+                # -- see its docstring-equivalent comment there for why
+                # this index must stay in sync with that field order).
+                embed.set_field_at(index=1, name="Engine", value=engine_summary, inline=True)
+                embed.set_field_at(index=4,
                                    name=f"Progress :  100%", value="")
                                    # value=progressBar.filledBar(100, 100,
                                    #                             size=10, line="🟥", slider="🟩")[
@@ -697,7 +781,8 @@ class Translate(commands.Cog):
                     description = await FileHandler.get_desc_from_text(story[:10000], title=name)
             return await FileHandler().distribute(self.bot, ctx, name, language, original_Language, rawname,
                                                   description,
-                                                  thumbnail=thumbnail, library=library, novel_url=novel_url)
+                                                  thumbnail=thumbnail, library=library, novel_url=novel_url,
+                                                  engine_summary=engine_summary)
         except Exception as e:
             if "Translation stopped" in str(e):
                 return await ctx.send("Translation stopped")
@@ -777,13 +862,19 @@ class Translate(commands.Cog):
     async def cc_prog(self, msg: discord.Message, embed: discord.Embed, author_id: int, timer: int =8) -> typing.Optional[
         discord.Message]:
         # bardata = progressBar.filledBar(100, 0, size=10, line="🟥", slider="🟩")
+        # Fields already on `embed` at this point: 0 Translating to,
+        # 1 Engine, 2 From, 3 Size -- so this "Progress" field lands at
+        # index 4, not 3. Every set_field_at() below targets index=4 to
+        # match; if another field is ever inserted before this one,
+        # update these indices (and the one in the main translate()
+        # command that also finalizes this same field) together.
         embed.add_field(name="Progress", value="", inline=False)
         while author_id in self.bot.translator:
             out = self.bot.translator[author_id]
             split = out.split("/")
             if split[0].isnumeric():
                 progress = int(round(eval(out) * 100, 2))
-                embed.set_field_at(index=3,
+                embed.set_field_at(index=4,
                                    name=f"Progress :  {str(progress)}%  ({out}) {discord.utils.format_dt(datetime.datetime.now(), style='R')}", value="")
                                    # value=progressBar.filledBar(int(split[1]), int(split[0]),
                                    #                             size=10, line="🟥", slider="🟩")[
@@ -795,14 +886,14 @@ class Translate(commands.Cog):
             if int(split[0]) % 3 == 0:
                 await FileHandler.update_status(self.bot)
             if len(asyncio.all_tasks()) >= 9:
-                embed.set_field_at(index=3,
+                embed.set_field_at(index=4,
                                    name=f"Progress : ",
                                    value=f"progress bar is closed .please use .tp to check progress")
                 embed.set_image(url="")
                 return await msg.edit(embed=embed)
             await asyncio.sleep(timer)
 
-        embed.set_field_at(index=3,
+        embed.set_field_at(index=4,
                            name=f"Progress :  100%", value="")
                            # value=progressBar.filledBar(100, 100,
                            #                             size=10, line="🟥", slider="🟩")[

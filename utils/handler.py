@@ -712,7 +712,8 @@ class FileHandler:
 
     async def distribute(
             self, bot: Raizel, ctx: commands.Context, name: str, language: str, original_language: str, raw_name: str,
-            description: str = "", thumbnail: str = "", library: int = None, novel_url: str = None
+            description: str = "", thumbnail: str = "", library: int = None, novel_url: str = None,
+            engine_summary: str = ""
     ) -> None:
         download_url = None
         discord_dnld_url = None
@@ -739,6 +740,8 @@ class FileHandler:
                               colour=discord.Colour.dark_gold())
         embed.add_field(name="Category", value=category)
         embed.add_field(name="Language", value=language)
+        if engine_summary:
+            embed.add_field(name="Translation Engine", value=engine_summary)
         if novel_url:
             embed.add_field(name="Crawled from", value=novel_url)
         embed.set_thumbnail(url=thumbnail)

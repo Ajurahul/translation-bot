@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import threading
 import time
 import typing as t
 
@@ -11,6 +12,7 @@ from translation.errors import filter_error_text as _filter_error_text_impl
 from translation.errors import is_error_response as _is_error_response_impl
 from translation.jobs import job_limiter
 from translation.manager import TranslationManager
+from translation.registry import registry as translation_registry
 
 
 class Translator:
@@ -34,7 +36,29 @@ class Translator:
     admin-configured engine, persisted in config/translation_settings.json),
     "auto" (intelligent per-job failover), or a specific provider id from
     translation.registry (e.g. "translators-bing").
+
+    Per-job engine-usage tracking: a single Discord `/translate` job may
+    span *several* Translator instances (see cogs/translation.py's large-
+    file path, which creates a fresh Translator per outer chunk group,
+    each with its own TranslationManager), so usage is aggregated at the
+    class level, keyed by Discord user id, rather than kept only on
+    `self._manager.usage`:
+      - `Translator.reset_job_usage(user_id)` at the start of a job.
+      - each instance folds its own manager's usage in automatically at
+        the end of `start()`.
+      - `Translator.get_job_usage_summary(user_id)` for the human-
+        readable summary shown in Discord embeds (e.g. "Google Translate"
+        if one engine did everything, or "Google Translate (41), MyMemory
+        (3)" if the job had to hop mid-way).
     """
+
+    # user id -> {engine id -> chunks translated}. threading.Lock (not
+    # asyncio.Lock): translates() fans work out across worker threads
+    # (concurrent.futures.ThreadPoolExecutor), each running its own
+    # asyncio.run() via _run_async_blocking, so this is genuinely
+    # touched from multiple OS threads at once.
+    _job_usage: t.Dict[int, t.Dict[str, int]] = {}
+    _job_usage_lock = threading.Lock()
 
     def __init__(self, bot: Raizel, user: int, language: str, engine: str = "default") -> None:
         self.bot = bot
@@ -47,6 +71,45 @@ class Translator:
     @property
     def manager(self) -> TranslationManager:
         return self._manager
+
+    # -- per-job engine-usage tracking, aggregated across every
+    # Translator/TranslationManager instance a single job touches -------
+    @classmethod
+    def reset_job_usage(cls, user_id: int) -> None:
+        """Call once at the very start of a `/translate` job (before any
+        Translator instance for it is constructed) so a previous job's
+        usage for this user doesn't leak into the new one."""
+        with cls._job_usage_lock:
+            cls._job_usage[user_id] = {}
+
+    def _fold_usage_into_job(self) -> None:
+        usage = self._manager.usage
+        if not usage:
+            return
+        with Translator._job_usage_lock:
+            agg = Translator._job_usage.setdefault(self.user, {})
+            for engine, count in usage.items():
+                agg[engine] = agg.get(engine, 0) + count
+
+    @classmethod
+    def get_job_usage_summary(cls, user_id: int) -> str:
+        """Human-readable "which engine(s) actually translated this"
+        summary for Discord embeds. Falls back to "Auto (<label>)" (or
+        just the resolved engine's label, for Default/explicit jobs) if
+        nothing has been tracked yet -- e.g. shown while a job is still
+        starting up, before its first chunk has completed."""
+        with cls._job_usage_lock:
+            usage = dict(cls._job_usage.get(user_id, {}))
+        if not usage:
+            return f"Auto ({TranslationManager().display_engine_name()})"
+        if len(usage) == 1:
+            engine = next(iter(usage))
+            return translation_registry.get_display_name(engine)
+        ranked = sorted(usage.items(), key=lambda kv: (-kv[1], kv[0]))
+        return ", ".join(
+            f"{translation_registry.get_display_name(engine)} ({count})"
+            for engine, count in ranked
+        )
 
     # -- response validation helpers (kept for backward compatibility) --
     @staticmethod
@@ -275,6 +338,7 @@ class Translator:
             k: v for k, v in sorted(self.order.items(), key=lambda item: item[0])
         }
         full_story = [i[0] for i in list(ordered_story.values()) if i[0] is not None]
+        self._fold_usage_into_job()
         return "".join(full_story)
 
     @staticmethod

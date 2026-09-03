@@ -67,6 +67,7 @@ def register_default_providers(reg: ProviderRegistry = registry) -> None:
     from .providers import (
         ai_backend,
         deep_translator_backend,
+        deep_translator_keyed_backend,
         googletrans_backend,
         libretranslate_backend,
         lingva_backend,
@@ -75,6 +76,7 @@ def register_default_providers(reg: ProviderRegistry = registry) -> None:
 
     googletrans_backend.register(reg)
     deep_translator_backend.register(reg)
+    deep_translator_keyed_backend.register(reg)
     translators_backend.register(reg)
     lingva_backend.register(reg)
     libretranslate_backend.register(reg)

@@ -31,6 +31,20 @@ DEFAULT_CONFIG: t.Dict[str, t.Any] = {
         "translators-reverso",
         "libretranslate",
         "lingva",
+        # Optional keyed engines -- each is only ever a real candidate
+        # once its required env var(s) are set (see
+        # translation/providers/deep_translator_keyed_backend.py);
+        # listing them here unconditionally is safe because
+        # is_provider_available() gates them, same as every other
+        # engine in this list. Unlike the ai-* engines (see
+        # ai_backend.py), these are deliberately included by default --
+        # a configured DeepL/Microsoft/Papago/Baidu key is a translation
+        # quota the operator already has, not an unbounded pay-per-call
+        # LLM API they'd want to opt into separately.
+        "deepl",
+        "microsoft",
+        "papago",
+        "baidu",
     ],
     "retry_delays": [2, 4, 7],
     "request_delay": 0.2,

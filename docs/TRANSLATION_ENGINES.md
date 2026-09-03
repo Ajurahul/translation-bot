@@ -1,330 +1,245 @@
-# Translation Engines
+# Translation engines
 
-`/translate` now has a `translation_engine` option (autocomplete, since the
-provider list is longer than Discord's 25-choice static limit would allow)
-with three kinds of value:
+The novel-translation feature (`utils/translate.py`'s `Translator`, backed
+by the `translation/` package) can use several different translation
+services. Some work out of the box with no signup; a few optional ones
+unlock automatically the moment you set the right environment
+variable(s) — no code changes or restarts-with-flags needed, just set
+the variable and restart the bot (or run `.enginecheck`, see below).
 
-| Value | Meaning |
+This doc covers: which engines are already active for free, how to add
+the optional keyed ones, how engine selection/health-checking actually
+behaves, and how to use the `.enginecheck` admin command.
+
+## Already active, free, no signup
+
+These work immediately, no configuration required:
+
+| Engine | Notes |
 |---|---|
-| `Default` | Use the bot-wide default engine, as currently configured by an admin. |
-| `Auto` | Intelligently pick a healthy engine and stick with it for the whole job. |
-| A specific engine (e.g. `Translators - Bing`) | Use *only* that engine. If it fails, the job fails — it never silently falls back to something else. |
+| Google Translate (`googletrans`) | Unofficial client library. |
+| Google Translate (`deep-google`) | Via `deep-translator`'s `GoogleTranslator`. |
+| Bing (`translators-bing`) | Via the `translators` package. |
+| MyMemory (`deep-mymemory`) | Via `deep-translator`; see the MyMemory-specific handling below. |
+| MyMemory (`translators-mymemory`) | Via the `translators` package (independent implementation/quirks from the one above). |
+| Yandex (`translators-yandex`) | Via the `translators` package. |
+| Reverso (`translators-reverso`) | Via the `translators` package. |
+| LibreTranslate (`libretranslate`) | Public mirror by default; see below for pointing it at a different/self-hosted instance. |
+| Lingva (`lingva`) | Public Lingva instance (a privacy-respecting Google Translate front-end). |
 
-## Supported engines
+Having this many free engines active is the whole point of Auto mode
+(see "How engine selection works" below): if one is down, rate-limited,
+or blocked, the bot has several others to fall back to without an
+operator having to do anything.
 
-| Internal id | Display name | Key required | Notes |
-|---|---|---|---|
-| `googletrans` | GoogleTrans | No | `googletrans==4.0.2`. Client is reused across calls within an event loop (see Performance below). |
-| `deep-google` | Deep Translator - Google | No | `deep-translator`'s `GoogleTranslator`. |
-| `deep-mymemory` | Deep Translator - MyMemory | No | `deep-translator`'s `MyMemoryTranslator`. Small daily quota per IP on the anonymous tier. |
-| `translators-google` | Translators - Google | No | Via the `translators` package (unofficial endpoint, see below). |
-| `translators-bing` | Translators - Bing | No | Same provider the previous implementation called "bing". |
-| `translators-mymemory` | Translators - MyMemory | No | |
-| `translators-yandex` | Translators - Yandex | No | |
-| `translators-apertium` | Translators - Apertium | No | Open-source engine, narrower language coverage than the others. |
-| `translators-reverso` | Translators - Reverso | No | Via the `translators` package. |
-| `lingva` | Lingva Translate | No | Open-source, no-key front end for Google Translate; direct REST call (`translation/providers/lingva_backend.py`), no `translators`/`deep-translator` dependency. Configurable mirror via `LINGVA_URL`. |
-| `libretranslate` | LibreTranslate | No | Open-source; direct REST call to a public mirror by default (`translation/providers/libretranslate_backend.py`) — implemented directly rather than through `deep-translator`'s `LibreTranslator`, which (as shipped in `deep-translator==1.11.4`) unconditionally requires an API key even against mirrors that don't. Configurable via `LIBRETRANSLATE_URL` / `LIBRETRANSLATE_API_KEY`. |
-| `ai-claude` | AI - Claude | **Yes** (`ANTHROPIC_API_KEY`) | LLM-based translation via the Anthropic Messages API. Paid, opt-in, not in the default Auto rotation — see "AI translation mode" below. |
-| `ai-openai` | AI - OpenAI | **Yes** (`OPENAI_API_KEY`) | LLM-based translation via the OpenAI Chat Completions API. Same opt-in rules as `ai-claude`. |
+### MyMemory's quirks, handled automatically
 
-The free entries all work by talking to a provider's public web-translate
-endpoint or a community-run open-source mirror the same way a browser
-would — there's no official paid API involved, but that also means
-they're unofficial/community endpoints that can change or start
-rate-limiting without notice. Several `translators` providers were
-deliberately **not** exposed:
+MyMemory is free and requires no signup, but it has three rough edges
+that `deep-mymemory` now handles for you:
 
-* `alibaba`, `baidu`, `caiyun`, `deepl`, `niutrans`, `sysTran`, `volcEngine`,
-  `youdao`, `papago`, and most of the remaining catalogue require paid
-  accounts/API keys for reliable bulk use, or their free-tier behaviour
-  through `translators` couldn't be verified as stable enough to ship here.
-* `argos` needs a locally-installed language model per language pair, which
-  doesn't fit a Discord bot translating arbitrary novel text.
+- **~500 character request limit.** Longer text is automatically split
+  on the nearest paragraph, then sentence, then word boundary (never
+  mid-word except as an absolute last resort) and stitched back
+  together after translation.
+- **Region-tagged language codes** (`en-GB`, `ko-KR`, ...) instead of
+  plain 2-letter codes. Handled by an automatic code mapping — you don't
+  need to do anything.
+- **Silent quota exhaustion.** When MyMemory's free daily quota runs
+  out, it doesn't return an HTTP error — it returns a warning string
+  (e.g. "MYMEMORY WARNING", "YOU USED ALL AVAILABLE FREE
+  TRANSLATIONS...") *as the translation itself*. This is detected and
+  treated as a real failure instead of being passed through as garbled
+  output.
 
-Adding a properly credentialed provider later (e.g. an official DeepL key)
-is a matter of adding one more `TranslationBackend` subclass and calling
-`registry.register(...)` for it — see `translation/providers/*.py` for the
-pattern, and `ai_backend.py` specifically for the "gate `is_available()` on
-an env var, keep it out of the default Auto rotation" pattern a paid
-provider should follow.
+### LibreTranslate: free by default, pointable at your own instance
 
-## AI translation mode
+`libretranslate` talks to a public LibreTranslate mirror with no key
+required. If you run your own instance (or a mirror that requires a
+key), set:
 
-`ai-claude` and `ai-openai` ask a general-purpose LLM to translate rather
-than calling a dedicated translation service. They're strictly opt-in:
+- `LIBRETRANSLATE_URL` — base URL of your instance, e.g.
+  `https://libretranslate.example.com`.
+- `LIBRETRANSLATE_API_KEY` — only if your instance requires one.
 
-* `is_available()` is `False` unless the corresponding API key
-  (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) is set in the environment — so
-  they never appear as selectable/eligible engines, and nothing is ever
-  silently charged, on a deployment that hasn't configured one.
-* They are **not** in the default `auto_engine_order` for the same reason
-  — Auto must never spend a configured key's money without the operator
-  choosing to. To let Auto use one, add its id to `auto_engine_order` in
-  `config/translation_settings.json` yourself.
-* An operator who has a key configured can still select `AI - Claude` /
-  `AI - OpenAI` explicitly from `/translate`, or set it as the bot-wide
-  default via `/set_translation_engine`.
-* Model names are configurable (`ANTHROPIC_TRANSLATE_MODEL` /
-  `OPENAI_TRANSLATE_MODEL`), defaulting to a small/cheap model for each
-  provider. No key is ever logged, hard-coded, or persisted to
-  `config/translation_settings.json`.
+Neither variable is required for the default free path to keep working.
 
-## Resource protection (rate limiting & concurrency)
+## Optional, free-with-signup engines
 
-Two independent mechanisms exist to keep a heavy translation workload
-from tripping provider rate limits or overloading the host it runs on —
-they solve different problems and are both needed:
+Each of these is **only added to the engine rotation if its required
+environment variable(s) are set**. If a variable is missing, the engine
+simply never appears as a candidate — no partial/broken entry, no error
+at startup, nothing logged as a failure. Set the variable(s) and restart
+the bot (or trigger `.enginecheck`) to bring one online.
 
-* **Per-provider requests-per-minute limiting** (`translation/ratelimit.py`,
-  wired into `TranslationManager._call_backend`). A token bucket per
-  provider caps how many requests/minute go to that provider, *across
-  every job in the process*. This is what actually prevents tripping a
-  provider's own rate limiting — the concurrency semaphore below only
-  bounds how many calls are in flight at once, not how fast they fire
-  back-to-back. Configurable via `requests_per_minute` (global default)
-  and `provider_requests_per_minute` (per-provider override). The initial
-  burst allowance is capped at roughly a tenth of the per-minute rate
-  (floored at 1) rather than the full minute's budget, so a job can't
-  fire an entire minute's quota instantly at start — see
-  `TranslationManager._rate_limit_for`.
-* **Per-provider concurrency limiting** (already covered above under
-  Performance) — `max_concurrency` / `provider_concurrency`, unchanged.
-* **Bot-wide concurrent-job limiting** (`translation/jobs.py`,
-  `job_limiter`, wired into `Translator.start()` in `utils/translate.py`).
-  Each translation job spins up its own worker-thread pool (4-6 threads)
-  independent of anything provider-related — enough *simultaneous* jobs
-  from different users can add up to more OS threads/outbound traffic
-  than a small host can handle at once, regardless of how well any single
-  provider's load is bounded. `max_concurrent_jobs` (default `4`) caps
-  how many jobs run at the same time; anything beyond that **queues**
-  for a slot rather than being rejected — every request still completes,
-  just not all simultaneously. `/translate` posts a one-time "queued"
-  notice if a job has to wait for a slot.
+### DeepL
 
-All of these are configurable in `config/translation_settings.json`
-(see the example below) and, like `default_engine`, degrade safely to
-`translation.config.DEFAULT_CONFIG`'s values if the file is missing,
-corrupted, or omits a key.
+- **Free tier:** DeepL API Free — 500,000 characters/month, no credit
+  card required.
+- **Env var:** `DEEPL_API_KEY`
+- **Sign up:**
+  1. Go to <https://www.deepl.com/en/pro-api> (or
+     `deepl.com/en/pro#developer`) and create a **DeepL API** account —
+     this is a separate account/product from a regular deepl.com
+     translator login, even if you already have one of those.
+  2. Choose the **API Free** plan.
+  3. Find your key under **Account → API Keys**. Free keys end in
+     `:fx` — the bot leaves `use_free_api` at its default (`True`), so a
+     `:fx` key is automatically routed to the free `api-free.deepl.com`
+     endpoint; nothing else to configure.
+  4. Set `DEEPL_API_KEY` to that key and restart the bot.
 
-## Modes, in detail
+### Microsoft Translator (Azure)
 
-### Default
+- **Free tier:** F0 tier — 2,000,000 characters/month, doesn't expire.
+- **Env vars:** `MICROSOFT_API_KEY` (required), `MICROSOFT_REGION`
+  (optional, but recommended — e.g. `eastus`; some Azure resources
+  reject requests that omit the region header).
+- **Sign up:**
+  1. Create/sign in to an Azure account at <https://azure.microsoft.com>.
+     **Friction to know about up front:** creating an Azure account
+     itself requires a credit/debit card for identity verification, even
+     though the Translator F0 tier itself never charges it.
+  2. In the Azure Portal, **Create a resource** → search **Translator**
+     → **Create**.
+  3. Under **Pricing tier**, select **F0 (Free)** — each Azure account
+     gets one free Translator subscription.
+  4. Once created, go to **Keys and Endpoint** on the resource to get
+     your key and region.
+  5. Set `MICROSOFT_API_KEY` (and ideally `MICROSOFT_REGION`) and
+     restart the bot.
 
-Resolved from `translation.config.settings.default_engine` exactly once,
-when the job starts. If an admin changes the default while a job is
-already running, that job keeps using whatever it already resolved —
-only new jobs see the new default (see `TranslationManager._resolve_default_engine`
-and the `test_default_resolution_is_frozen_at_job_start` /
-`test_admin_write_does_not_affect_already_constructed_managers` tests).
+### Papago (Naver)
 
-If the persisted default is missing, corrupted, or points at a provider
-that's currently unavailable, the manager falls back through
-`["googletrans", *auto_engine_order]` and picks the first available one
-instead of crashing the job.
+Especially strong for Korean — worth prioritizing given this bot already
+has Korean-specific handling elsewhere (see `utils/handler.py`'s
+channel-routing logic).
 
-### Auto
+- **Free tier:** Naver Cloud Platform (NCP) issues free starter credit
+  for its AI/NAVER APIs (Papago included); check the current amount/
+  duration in the NCP console, since Naver changes this periodically.
+- **Env vars:** `PAPAGO_CLIENT_ID` and `PAPAGO_SECRET_KEY` (both
+  required).
+- **Sign up:**
+  1. Create an account at <https://www.ncloud.com> (Naver Cloud
+     Platform — a *different* signup from a regular naver.com account).
+     **Friction to know about up front:** NCP signup requires phone
+     verification, and historically this has been the roughest part of
+     this whole doc for anyone outside Korea — some regions/carriers
+     aren't accepted, in which case Naver's own support is the only
+     real path forward. Budget extra time for this step specifically.
+  2. In the NCP console, go to **Services → AI·NAVER API → Application**
+     and register a new application, enabling the **Papago Translation**
+     (NMT) API for it.
+  3. Copy the issued **Client ID** and **Client Secret**.
+  4. Set `PAPAGO_CLIENT_ID` / `PAPAGO_SECRET_KEY` and restart the bot.
 
-* When there's no already-proven-healthy engine for this job yet (job
-  start, or right after the current one just failed), Auto **races every
-  currently-available candidate concurrently** and adopts whichever
-  succeeds first — it does not wait on them one at a time in
-  `auto_engine_order`. A candidate that loses the race is cancelled;
-  losing candidates that had already started a real request are still
-  counted as "called" (a request was genuinely fired) even though their
-  result is discarded.
-* Whichever engine wins becomes `active_engine` and is reused directly
-  for every subsequent chunk in the same job — no re-racing/re-probing
-  per chunk. This is the main cost/latency trade-off of racing: it can
-  fire several requests at once, but only **once** per "engine needed"
-  event, not once per chunk.
-* If the active engine starts failing, it's retried (per the normal retry
-  policy) then marked failed *for this job only*, and Auto races the
-  remaining healthy candidates again to find a replacement.
-* `failed_engines` is a per-job set. It's never written to global/shared
-  state, so one job's outage never affects another job's — or another
-  user's — choice of engine (see `test_per_job_failed_state_does_not_leak_between_jobs`).
-* If every candidate in a race fails, the per-job failed set is cleared
-  **once** and a fresh race is run (bounded recovery — a provider's
-  outage might have been transient). If that also fails, the job raises
-  `AllEnginesFailedError` — there is no unbounded retry loop
-  (`test_all_engines_fail_bounded_reset_then_raises`).
+### Baidu Translate
 
-See `TranslationManager._discover_auto_engine` in `translation/manager.py`
-and the `test_auto_races_candidates_and_a_faster_later_engine_can_win` /
-`test_auto_race_survives_a_loser_raising_after_being_cancelled` tests.
+- **Free tier:** two tiers exist —
+  - **Standard**: 50,000 characters/month free, available immediately
+    after registering, no identity verification.
+  - **Premium** (recommended if you'll use this regularly): 1,000,000
+    characters/month free, but requires completing Baidu's identity
+    verification step during setup.
+- **Env vars:** `BAIDU_APP_ID` and `BAIDU_APP_KEY` (both required).
+- **Sign up:**
+  1. Go to <https://fanyi-api.baidu.com/> and log in with (or create) a
+     Baidu account.
+  2. Open the console and register as an **Individual Developer** (or
+     Enterprise, if applicable).
+  3. Activate the **General Translation API**, choosing Standard or
+     Premium (Premium requires the identity-verification step mentioned
+     above).
+  4. Your **APP ID** and **Key** are shown at the bottom of the console
+     page (<https://fanyi-api.baidu.com/api/trans/product/desktop>).
+  5. Set `BAIDU_APP_ID` / `BAIDU_APP_KEY` and restart the bot.
 
-### Explicit engine
+### A note on engines that *don't* have a genuine free path
 
-Only that engine is ever tried (with the normal retry policy). On final
-failure the job raises `TranslationFailedError` — never a silent switch to
-another provider (`test_explicit_engine_fails_without_falling_back`).
+Not every major translation provider offers something that's actually
+free-with-signup the way the ones above do. **Alibaba's translation API
+is one of these** — it doesn't have a no-cost tier comparable to DeepL
+Free, Azure's F0, or Baidu's Standard tier, so it isn't wired in here.
+If you specifically need it, it would have to be added as a paid engine
+with its own billing setup — not something this doc pretends is free
+just to pad out the list. The same caution applies to any other provider
+not listed above: if it isn't documented here with a real free tier and
+real signup steps, assume it needs a paid plan.
 
-## Admin command
+## How auto-mode engine selection works
 
-`/set_translation_engine engine:<id>` — guarded by the same
-`@commands.has_role(1020638168237740042)` check as every other admin-only
-command in `cogs/admin.py`. It validates the engine is registered *and*
-currently available, persists it to
-`config/translation_settings.json`, and confirms with the new display
-name. A missing/corrupted settings file is never fatal — the bot falls
-back to `translation.config.DEFAULT_CONFIG` and keeps running; the file is
-(re)written the next time the default changes.
+When a job uses `engine="auto"` (the bot's `.translate` command's Auto
+option), the manager doesn't try engines one at a time in a fixed order
+with a single "preferred" engine — it **races every currently-available
+engine concurrently** the first time it needs one, and adopts whichever
+responds successfully first. Every later chunk in that same job reuses
+that winner directly instead of re-racing, so the racing overhead only
+happens once (or again, if the winner later fails mid-job).
 
-## Response validation
+This means:
 
-Every backend's raw response goes through `translation.validation` before
-it's ever returned or written to a file:
+- There's no single global "currently preferred" engine — which engine
+  wins can vary job to job (network conditions, which engines happen to
+  be under load elsewhere, etc). The `/translate` progress embed's
+  "Engine" field always tells you what actually happened for *that* job
+  (e.g. `"Google Translate"`, or `"Google Translate (41), MyMemory (3)"`
+  if it had to hop mid-job) rather than a static prediction.
+- A configured optional engine (DeepL, Microsoft, Papago, Baidu) is
+  automatically included as a race candidate the moment its env
+  var(s) are set — no separate "enable in auto mode" step.
 
-* `None` or an empty string (when the source text wasn't itself empty) is
-  rejected.
-* HTTP 429/500/502/503/504, timeouts, and connection errors are treated as
-  retry-worthy (`TransientTranslationError`).
-* A detected provider error page (matching known phrases such as
-  `"error 500"`, `"server error"`, `"please try again later"`, or two or
-  more such phrases together) is rejected and retried — but a legitimate
-  translation that simply happens to contain the word "error" once is
-  **not** rejected (`test_valid_translation_containing_the_word_error_is_accepted`).
-  `filter_error_text()` (a secondary cleanup step, carried over from the
-  previous implementation) is only ever applied *after* an error was
-  already detected — never unconditionally — specifically so it can't
-  mangle a clean response that happens to contain that word.
+## Cooldown vs. session-disable
 
-## Performance
+An **ordinary transient failure** (a timeout, a network blip) during a
+job only affects that one job — it's excluded from that job's engine
+race and nothing else changes; the very next `/translate` job will try
+it again fresh.
 
-What changed vs. the previous ~1 hour/2 MB implementation:
+A **quota/rate-limit failure** is treated differently: retrying an
+engine that's already burned through its daily/monthly quota every few
+minutes is never going to succeed until the quota resets, so instead of
+just backing off, that engine is **session-disabled** — excluded from
+Auto's race entirely — for the rest of the bot process. There's no
+timer; it only comes back once a health check (see below) actually
+succeeds against it again, which normally means: the quota reset, or an
+admin fixed a bad key and ran `.enginecheck`.
 
-* **Client reuse.** `GoogleTransBackend` builds its `googletrans.Translator`
-  client once and reuses it for every call for the life of the process
-  (previously: `async with GoogleTransClient(): ...` per chunk). Same idea
-  for `deep-translator`'s clients, cached per `(source, target)` language
-  pair.
-* **Client reuse, with a real constraint made explicit.** `GoogleTransBackend`
-  reuses its `googletrans.Translator` client across calls, but only *within
-  a single event loop*: googletrans holds an `httpx.AsyncClient`, whose
-  connection-pool internals bind to whichever event loop is running the
-  first time they're actually used. This project processes each chunk via
-  a fresh `asyncio.run()` call (see `Translator._run_async_blocking` in
-  `utils/translate.py`), so blindly caching one client forever and reusing
-  it across those separate loops would silently start reusing internals
-  bound to an already-closed loop after the very first chunk (a real bug
-  caught during review — see the code review notes below). The backend
-  now tracks which loop its cached client belongs to and transparently
-  rebuilds it whenever that loop has changed, so reuse still happens
-  within a call/loop without ever crossing a closed one. `deep-translator`'s
-  clients hold no event-loop-bound state at all (verified against the
-  installed package source — each call is a plain, fresh `requests.get()`),
-  so those are cached and reused freely across threads/loops.
-* **Provider instances are process-lifetime singletons** (`ProviderRegistry`
-  caches them), so this goes a step further than "one client per job" —
-  they're reused across jobs too, not just across chunks within one job.
-* **Bounded, provider-scoped concurrency** via a `threading.BoundedSemaphore`
-  per engine id (`translation.max_concurrency`, overridable per-provider via
-  `translation.provider_concurrency`), acquired through `asyncio.to_thread`
-  so it can never block an event loop that has other work to do.
-* **Auto mode stops probing once it finds a healthy engine** instead of
-  trying every engine on every chunk (`test_auto_reuses_successful_engine_on_next_chunk_without_reprobing`).
-* **Centralized retry with a short, configurable backoff**
-  (`translation.retry_delays`, default `[2, 4, 7]`) instead of ad hoc sleeps
-  scattered through the translation code.
-* **Bounded worst case**: Auto's all-engines-failed recovery resets and
-  retries exactly once, never loops indefinitely.
+## Startup and on-demand health checks
 
-No formal before/after benchmark was run against live provider endpoints as
-part of this change (this environment has no outbound network access to
-translation providers) — the claims above describe what changed
-structurally, not a measured wall-clock number. Run the pipeline against a
-real ~2 MB file in an environment with network access and compare against
-the ~1 hour baseline to get an actual figure; the removed per-chunk client
-creation and the switch from full-order probing to active-engine reuse in
-Auto mode are the two changes most likely to matter for that number.
+Every time the translation cog loads (bot startup, or a cog
+reload), it fires a background health check: one tiny real translation
+("hello", English → Spanish) through **every currently configured
+engine — including already session-disabled ones**, so a *recovery*
+gets detected too, not just new failures. This never blocks or crashes
+bot startup; failures are just logged.
 
-## Configuration
+- Engine passes, was previously disabled → re-enabled (available again
+  as an Auto candidate; not necessarily what wins the very next race,
+  just eligible again).
+- Engine passes, was already fine → no change.
+- Engine fails → session-disabled for the rest of the process, with the
+  error recorded as the reason.
+- An engine missing its required credentials/package isn't treated as a
+  failure at all — it's just not applicable right now.
 
-`config/translation_settings.json` (created on first admin write; a
-missing file just means "use defaults"):
+## The `.enginecheck` command
 
-```json
-{
-  "default_engine": "googletrans",
-  "auto_engine_order": [
-    "googletrans",
-    "deep-google",
-    "translators-google",
-    "translators-bing",
-    "deep-mymemory",
-    "translators-mymemory",
-    "translators-yandex",
-    "translators-reverso",
-    "libretranslate",
-    "lingva"
-  ],
-  "retry_delays": [2, 4, 7],
-  "request_delay": 0.2,
-  "max_concurrency": 3,
-  "provider_concurrency": {},
-  "min_recoverable_chunk_chars": 120,
-  "requests_per_minute": 50,
-  "provider_requests_per_minute": {},
-  "max_concurrent_jobs": 4
-}
-```
+Bot-owner only (`@commands.is_owner()`, the same gate this bot's other
+true owner-only command — `addrole` in `cogs/general.py` — uses). Runs
+the health check above **right now** and posts an embed listing every
+registered engine with a status icon:
 
-Only `default_engine` is ever written by the admin command; the rest are
-read from this same file if present (edit it directly to tune them) and
-otherwise come from `translation.config.DEFAULT_CONFIG`. Nothing in this
-file is ever a secret — API keys, if a future provider needs one, belong
-in an environment variable instead (see `translation/providers/translators_backend.py`
-and `deep_translator_backend.py` for the `is_available()` pattern that
-checks for one).
+- 🟢 recovered / newly working this check
+- ✅ still working (no change)
+- 🔴 newly failed this check
+- 🟥 still disabled (no change), with a short reason
+- ⚪ not configured (missing package/credentials — not a failure)
 
-## Known limitations
+It also marks which engine is the configured default (`*(default)*`)
+and shows a summary of which engine(s) your own most recent translation
+job actually used.
 
-* Every `translators`-package provider here is an **unofficial endpoint**
-  (browser-style scraping of the provider's public translate page, not an
-  official paid API) and can break or start rate-limiting without notice.
-  Treat `translators-*` engines as lower-reliability than `googletrans` /
-  `deep-google`.
-* `deep-mymemory` and `translators-mymemory` share MyMemory's anonymous
-  daily quota, which is fairly small; heavy use will hit 429s.
-* None of the `translators` backends here expose a real batch API in this
-  version of the package, so they fall back to one HTTP call per string —
-  `googletrans` and the `deep-*` backends are meaningfully faster for large
-  batches.
-* Language detection (`Translator.detect_with_retry` /
-  `Translator.adetect_with_retry`, and `FileHandler.find_language`) tries
-  multiple independent detectors — an offline statistical detector
-  (`langdetect`) first, then `googletrans` as a network-based fallback —
-  across several text samples, and is not affected by the selected
-  translation engine. See `translation/detection.py`.
-
-## Files
-
-```
-translation/
-├── base.py           TranslationBackend interface, ProviderCapabilities
-├── manager.py         TranslationManager: mode resolution, Auto racing/failover, retry, concurrency, rate limiting
-├── registry.py         ProviderRegistry: factory-based provider lookup/availability
-├── errors.py           Exception hierarchy + error-page detection
-├── validation.py        Response validation (used by the manager before returning anything)
-├── retry.py            Centralized retry/backoff
-├── ratelimit.py         Per-provider requests-per-minute token bucket
-├── jobs.py              Bot-wide concurrent-job limiter
-├── detection.py         Multi-engine language detection (langdetect + googletrans)
-├── config.py            Persistent settings (config/translation_settings.json)
-└── providers/
-    ├── googletrans_backend.py
-    ├── deep_translator_backend.py
-    ├── translators_backend.py
-    ├── lingva_backend.py
-    ├── libretranslate_backend.py
-    ├── ai_backend.py
-    └── http_backend.py   shared helper for the direct-REST-call backends
-```
-
-`utils/translate.py`'s `Translator` class is now a thin backward-compatible
-facade over this package — every previously-existing call site
-(`translate()`, `translates()`, `start()`, the static `*_with_retry`
-helpers, `_is_error_500_response`, `_filter_error_text`) keeps working
-unchanged; it just delegates to `TranslationManager` internally instead of
-containing the engine-switching logic itself.
+If a non-owner runs `.enginecheck`, the bot's existing global error
+handler (`cogs/errors.py`'s `on_command_error`) already catches
+`commands.NotOwner` and replies with a friendly embed rather than an
+unhandled exception — no special-casing needed in the command itself.

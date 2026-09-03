@@ -95,3 +95,53 @@ def is_transient_status(status_code: t.Any) -> bool:
         return int(status_code) in TRANSIENT_STATUS_CODES
     except (TypeError, ValueError):
         return False
+
+
+# Quota/rate-limit indicators -- deliberately distinct from
+# _ERROR_INDICATORS above. These specifically mean "this provider is out
+# of requests for now" rather than "this provider returned an error
+# page", which matters to callers that want to stop retrying/racing an
+# exhausted provider instead of just backing off and trying again (see
+# translation/health.py and TranslationManager's failure handling).
+_QUOTA_INDICATORS = (
+    "quota",
+    "too many requests",
+    "toomanyrequests",
+    "rate limit",
+    "ratelimit",
+    "daily limit",
+    "limit exceeded",
+    # MyMemory returns these as if they were the translation itself
+    # rather than raising an HTTP error -- see
+    # translation/providers/deep_translator_backend.py.
+    "mymemory warning",
+    "you used all available free translations",
+    "query length limit exceeded",
+)
+
+
+def is_quota_error(value: t.Any) -> bool:
+    """True if `value` (an exception, or raw text) looks like a
+    quota/rate-limit failure rather than a generic transient one."""
+    status = getattr(value, "status_code", None) or getattr(value, "code", None)
+    if is_transient_status(status) and int(status) == 429:
+        return True
+
+    text = str(value or "").lower()
+    return any(indicator in text for indicator in _QUOTA_INDICATORS)
+
+
+def is_mymemory_quota_warning(text: str) -> bool:
+    """MyMemory-specific check used directly on a *successful-looking*
+    response body (no exception raised) before it's ever treated as a
+    real translation -- see the MyMemory backend in
+    deep_translator_backend.py."""
+    low = str(text or "").lower()
+    return any(
+        indicator in low
+        for indicator in (
+            "mymemory warning",
+            "you used all available free translations",
+            "query length limit exceeded",
+        )
+    )
