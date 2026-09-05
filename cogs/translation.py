@@ -268,9 +268,10 @@ class Translate(commands.Cog):
             if no_tries >= 7:
                 return await ctx.reply(content="> Currently bot is busy.. please try after some time")
             if no_tries >= 5:
-                self.bot.translator = {}
-                if len(self.bot.translator) < 2:
-                    break
+                # See core/bot.py's is_busy() docstring: force-clearing this
+                # dict here doesn't free capacity, it just wipes other users'
+                # still-running jobs' progress state. Just keep waiting; the
+                # no_tries >= 7 check above already bails out.
                 await asyncio.sleep(20)
             await asyncio.sleep(10)
         if link is not None and ("discord.com/channels" in link or link.isnumeric()):

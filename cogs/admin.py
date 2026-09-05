@@ -214,13 +214,14 @@ class Admin(commands.Cog):
             while True:
                 no_of_times += 1
                 print("Started restart")
-                if not instant:
-                    await asyncio.sleep(3)
-                else:
+                if instant:
                     break
-                if not self.bot.crawler.items() and not self.bot.translator.items() and not self.bot.crawler_next.items():
-                    await asyncio.sleep(5)
-                    if not self.bot.crawler.items() and not self.bot.translator.items() and not self.bot.crawler_next.items():
+                await asyncio.sleep(3)
+                if not self.bot.is_busy():
+                    # Double-check after a short beat in case a job started
+                    # in between the check above and here.
+                    await asyncio.sleep(60)
+                    if not self.bot.is_busy():
                         print("restart " + str(datetime.datetime.now()))
                     else:
                         continue
@@ -234,10 +235,21 @@ class Admin(commands.Cog):
                 else:
                     print("waiting")
                     self.bot.app_status = "restart"
+                    active_ids = self.bot.active_job_user_ids()
+                    active_names = ', '.join(
+                        (self.bot.get_user(uid).global_name if self.bot.get_user(uid) else str(uid))
+                        for uid in active_ids
+                    )
                     await channel.send(
-                        content=f"> {no_of_times} : Restart waiting for {', '.join(self.bot.get_user(k).global_name for k in self.bot.translator.keys())} {', '.join(self.bot.get_user(k).global_name for k in self.bot.crawler.keys())}")
-                    self.bot.translator = {}
-                    self.bot.crawler = {}
+                        content=f"> {no_of_times} : Restart waiting for {active_names}")
+                    # Deliberately NOT clearing self.bot.translator/crawler
+                    # here anymore. They're the live progress store a running
+                    # job writes to (see utils/translate.py) - wiping them
+                    # mid-job doesn't stop the job, it just makes is_busy()
+                    # wrongly report "idle" on the next check, so a restart
+                    # would fire out from under a job that's still actively
+                    # running (and that job's progress reporting/cleanup
+                    # would then break since its dict entry vanished).
                     await asyncio.sleep(no_of_times * 10)
                     if no_of_times > 10:
                         self.bot.app_status = "up"
@@ -304,23 +316,45 @@ class Admin(commands.Cog):
             except Exception as e:
                 self.bot.logger.info(f"[git_update] exception: {e}")
                 await channel.send(f"git update failed: {str(e)[:1900]}")
-        if random.randint(0, 15) < 12 or server is True:
+        # Only reboot the whole EC2 instance when explicitly asked to
+        # (`server=True`). This used to fire on a 12/16 (75%) random roll on
+        # *every* restart - including the automatic scheduled ones - which
+        # meant the underlying server was being rebooted several times a day
+        # for no reason. That randomness is gone; server reboots now only
+        # happen when a human deliberately asks for one.
+        if server is True:
             try:
                 await channel.send("Server restarted")
                 subprocess.call(['sh', '/home/ubuntu/translation-bot/scripts/server-restart.sh'])
             except Exception as e:
                 await channel.send("Server restart failed")
-                await channel.send(e.with_traceback().__str__()[:1900])
+                await channel.send(str(e)[:1900])
+
+        self.bot.logger.info(
+            "[restart] closing bot connection and exiting process; "
+            "expecting docker-compose (restart: unless-stopped) or "
+            "scripts/auto-restart.sh to bring the process back up"
+        )
         for task in asyncio.all_tasks():
-            try:
+            if task is not asyncio.current_task():
                 task.cancel()
-            except:
-                pass
-        return await self.bot.start()
-        # print(sys.argv[0])
-        # print(sys.argv)
-        # os.execv(sys.executable, ['python'] + sys.argv)
-        # os.execv(sys.argv[0], sys.argv)
+        try:
+            # Cleanly log out / close the aiohttp session instead of trying
+            # to call bot.start() again on the same, already-started client.
+            # Re-entering bot.start() from inside a running bot is what was
+            # causing the reliability problems: it doesn't actually restart
+            # anything, it just piles a second connection attempt on top of
+            # the first, leaking connections/sessions and leaving the
+            # process in an increasingly broken state after every restart.
+            await self.bot.close()
+        except Exception:
+            self.bot.logger.exception("[restart] error while closing bot cleanly")
+        finally:
+            # Exit the process outright rather than returning control to the
+            # asyncio loop. Docker's restart policy / the cron watchdog is
+            # responsible for starting a fresh process - that's what makes
+            # this reliable instead of the old in-process "restart".
+            os._exit(0)
 
         # raise Exception("TooManyRequests")
         # h = heroku3.from_key(os.getenv("APIKEY"))

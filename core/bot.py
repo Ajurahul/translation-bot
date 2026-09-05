@@ -155,24 +155,112 @@ class Raizel(commands.Bot):
             await channel.send(f"Added Storage access to {n} users")
 
     async def connect_mega_account(self, channel):
+        """Connect to Mega without blocking the event loop, retrying
+        transient failures, and logging the *real* exception instead of
+        swallowing it.
+
+        The old version called `Mega().login(...)` directly (a blocking,
+        synchronous `requests` call) with no `await`/executor, which froze
+        the entire bot - every guild, every command - for as long as that
+        HTTP call took. It also had two bugs in its error handling: the
+        fallback branch's own exception was caught by a bare `except:` and
+        discarded, so the message you saw always reported the *first*
+        failure (the login with stored credentials), never the second one
+        (the anonymous login). That's why the reported error
+        (`_EventBundle.__init__() takes 1 positional argument but 2 were
+        given`) looked disconnected from "Mega" - it's a low-level HTTP
+        client error being raised from inside `requests`/its dependency
+        chain during that first login attempt, not anything about your
+        Mega credentials. It's consistent with a version mismatch between
+        `httpx`/`httpcore`/`h11` in requirements.txt (see the
+        `SyncHTTPTransport` compatibility shim in main.py, which is a sign
+        this dependency chain has caused problems before). Now that the
+        full traceback is logged via `self.logger.exception`, the next
+        occurrence will show exactly which line raised it.
+        """
+        megastore = None
         try:
             with open(os.getenv("MEGA"), 'rb') as f:
                 megastore = pickle.load(f)
-            self.mega = Mega().login(megastore["user"], megastore["password"])
-            print("Connected to Mega")
         except Exception as e:
-            try:
-                self.mega = Mega().login()
-                await channel.send(f"> <@&1020638168237740042> **Couldn't connect with Mega. some problem occured "
-                                   f"with mega account**\n{e}", allowed_mentions=discord.AllowedMentions(roles=False))
-                print("mega connection failed...connected anonymously....Please check password or account status")
-            except:
+            if self.logger:
+                self.logger.warning(f"[mega] could not read stored credentials: {e}")
+
+        def _login_with_credentials():
+            return Mega().login(megastore["user"], megastore["password"])
+
+        def _login_anonymous():
+            return Mega().login()
+
+        last_error: Exception | None = None
+        if megastore:
+            for attempt in range(1, 4):
+                try:
+                    self.mega = await self.loop.run_in_executor(None, _login_with_credentials)
+                    print("Connected to Mega")
+                    return
+                except Exception as e:
+                    last_error = e
+                    if self.logger:
+                        self.logger.warning(
+                            f"[mega] login attempt {attempt}/3 with stored credentials failed: {e!r}")
+                    else:
+                        print(f"[mega] login attempt {attempt}/3 failed: {e!r}")
+                    if attempt < 3:
+                        await asyncio.sleep(attempt * 5)
+
+        # Stored-credential login failed (or there were no stored
+        # credentials) - fall back to an anonymous session so
+        # upload/download features degrade gracefully instead of leaving
+        # self.mega unset.
+        try:
+            self.mega = await self.loop.run_in_executor(None, _login_anonymous)
+            print("mega login with stored credentials failed, connected anonymously")
+            if last_error is not None:
+                if self.logger:
+                    self.logger.warning(f"[mega] falling back to anonymous session: {last_error!r}")
                 await channel.send(
-                    f"> <@&1020638168237740042> **Couldn't connect with Mega servers. "
-                    f"some problem with connection \n{e}",
+                    f"> <@&1020638168237740042> **Couldn't connect to Mega with stored credentials, "
+                    f"connected anonymously instead.**\n```{last_error}```",
                     allowed_mentions=discord.AllowedMentions(roles=False))
-                print("mega login anonymously failed ..something wrong with mega", )
-            print(e)
+        except Exception as anon_error:
+            self.mega = None
+            if self.logger:
+                self.logger.exception("[mega] anonymous login also failed")
+            await channel.send(
+                f"> <@&1020638168237740042> **Couldn't connect with Mega servers. "
+                f"some problem with connection**\n```{anon_error}```",
+                allowed_mentions=discord.AllowedMentions(roles=False))
+
+    def is_busy(self) -> bool:
+        """Safe, read-only check for whether any translate/crawl job is in
+        flight. Never mutates self.translator/self.crawler/self.crawler_next
+        - those dicts double as the live progress store that commands like
+        `.t progress` read from (utils/translate.py writes strings like
+        "12/50" into them while a job runs), so clearing them mid-job wipes
+        that progress out from under a job that's still running and makes
+        anything checking "is someone busy" wrongly report "no" a moment
+        later, even though the job never stopped.
+
+        Backed by both the progress dicts *and* the task dicts, since a task
+        can briefly exist without a progress-dict entry yet (or vice versa)
+        around job start/cleanup.
+        """
+        if self.translator or self.crawler or self.crawler_next:
+            return True
+        if any(not task.done() for task in self.translator_tasks.values()):
+            return True
+        if any(not task.done() for task in self.crawler_tasks.values()):
+            return True
+        return False
+
+    def active_job_user_ids(self) -> list[int]:
+        """User IDs with a translate/crawl job currently tracked, for
+        status/progress messages. Read-only, see is_busy() above."""
+        ids = set(self.translator.keys()) | set(self.crawler.keys()) | set(self.crawler_next.keys())
+        ids |= {uid for uid, task in self.translator_tasks.items() if not task.done()}
+        ids |= {uid for uid, task in self.crawler_tasks.items() if not task.done()}
+        return list(ids)
 
     async def add_roles(self) -> int:
         guild = await self.fetch_guild(940866934214373376)

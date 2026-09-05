@@ -960,10 +960,13 @@ class Crawler(commands.Cog):
                 return await ctx.reply(content="> Currently bot is busy.. please restart the task after some time "
                                                "when bot is free")
             if no_tries >= 5:
-                self.bot.translator = {}
-                self.bot.crawler = {}
-                # if len(self.bot.crawler) < 3:
-                #     break
+                # Used to force-wipe self.bot.translator/self.bot.crawler here
+                # to fake free capacity. That doesn't free anything - it just
+                # deletes *other users'* still-running jobs' progress state
+                # out from under them (see core/bot.py's is_busy() docstring).
+                # Just keep waiting instead; the no_tries >= 7 check above
+                # already bails out with a "bot is busy" reply if it takes
+                # too long.
                 await asyncio.sleep(15)
         try:
             self.bot.crawler[ctx.author.id] = f"0/{len(urls)}"
@@ -1490,11 +1493,9 @@ class Crawler(commands.Cog):
                 return await ctx.reply(
                     content="> Currently bot is busy.. please restart the tasks after some time when bot is free")
             if no_tries >= 5:
-                self.bot.translator = {}
-                self.bot.crawler = {}
-                self.bot.crawler_next = {}
-                # if len(self.bot.crawler) < 3:
-                #     break
+                # See the identical fix earlier in this file: force-clearing
+                # these dicts here doesn't free capacity, it just wipes other
+                # users' still-running jobs. Just keep waiting.
                 await asyncio.sleep(15)
         try:
             description = (await Translator.atranslate_with_retry(
