@@ -1,10 +1,13 @@
 import asyncio
 import datetime
+import gc
+import glob
 import json
 import logging
 import os
 import pickle
 import random
+import time
 import traceback
 import typing as t
 from asyncio import Task
@@ -261,6 +264,85 @@ class Raizel(commands.Bot):
         ids |= {uid for uid, task in self.translator_tasks.items() if not task.done()}
         ids |= {uid for uid, task in self.crawler_tasks.items() if not task.done()}
         return list(ids)
+
+    def _sweep_orphaned_scratch_files(self, min_age_seconds: float = 900) -> tuple[int, int]:
+        """Removes leftover per-user working files (e.g. ``123.txt``,
+        ``123_cr.txt``, ``123.docx``, ``123.pdf``) sitting in the working
+        directory. These are written by utils/handler.py while a job runs
+        and are normally deleted when that job finishes, but any crash or
+        unhandled exception on the way there leaves them behind, and until
+        now they only got cleaned up at process startup/manual restart -
+        meaning they could sit there using disk for days on a
+        long-uptime process.
+
+        Only ever called while self.is_busy() is False (see idle_cleanup),
+        and additionally only touches files older than ``min_age_seconds``
+        as a second safety net against catching a file that's mid-write for
+        a job that hasn't been registered in self.translator/self.crawler
+        yet. Blocking filesystem calls only - call via run_in_executor.
+        """
+        removed, freed_bytes = 0, 0
+        now = time.time()
+        patterns = ("*.txt", "*.docx", "*.pdf", "*.epub")
+        skip = {"requirements.txt"}
+        for pattern in patterns:
+            for path in glob.glob(pattern):
+                name = os.path.basename(path)
+                if name in skip or "requirements" in name:
+                    continue
+                try:
+                    stat = os.stat(path)
+                    if now - stat.st_mtime < min_age_seconds:
+                        continue
+                    size = stat.st_size
+                    os.remove(path)
+                    removed += 1
+                    freed_bytes += size
+                except OSError:
+                    continue
+        return removed, freed_bytes
+
+    def _sweep_stale_chrome_profiles(self, min_age_seconds: float = 1800) -> int:
+        """Removes leftover Chrome/chromedriver temp profile directories
+        under /tmp. Selenium (cogs/crawler.py's get_driver()) doesn't pass
+        an explicit --user-data-dir, so Chrome creates a fresh scratch
+        profile per run and normally deletes it on driver.quit() - but a
+        crash, timeout, or killed process leaves it behind. Only runs while
+        self.chrome == 0 (no headless crawl currently using Chrome) so it
+        can never touch a live profile. Blocking - call via run_in_executor.
+        """
+        if self.chrome != 0:
+            return 0
+        removed = 0
+        now = time.time()
+        for pattern in (".com.google.Chrome.*", ".org.chromium.Chromium.*", "scoped_dir*"):
+            for path in glob.glob(os.path.join("/tmp", pattern)):
+                try:
+                    if now - os.path.getmtime(path) < min_age_seconds:
+                        continue
+                    if os.path.isdir(path):
+                        import shutil
+                        shutil.rmtree(path, ignore_errors=True)
+                    else:
+                        os.remove(path)
+                    removed += 1
+                except OSError:
+                    continue
+        return removed
+
+    async def idle_cleanup(self) -> dict:
+        """Frees RAM/disk while the bot is idle. Safe to call on a timer -
+        it's a no-op beyond gc.collect() unless self.is_busy() is False, so
+        it never touches a running job's files or state."""
+        stats = {"gc_collected": 0, "files_removed": 0, "bytes_freed": 0, "chrome_dirs_removed": 0}
+        stats["gc_collected"] = gc.collect()
+        if not self.is_busy():
+            removed, freed = await self.loop.run_in_executor(None, self._sweep_orphaned_scratch_files)
+            stats["files_removed"] = removed
+            stats["bytes_freed"] = freed
+            stats["chrome_dirs_removed"] = await self.loop.run_in_executor(
+                None, self._sweep_stale_chrome_profiles)
+        return stats
 
     async def add_roles(self) -> int:
         guild = await self.fetch_guild(940866934214373376)

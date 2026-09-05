@@ -55,6 +55,36 @@ async def housekeeping_error(error: BaseException):
         housekeeping.restart()
 
 
+@tasks.loop(minutes=20)
+async def idle_cleanup_loop():
+    """Frees RAM/disk when the bot is idle - see Raizel.idle_cleanup().
+    Runs every 20 min but only actually removes anything on ticks where no
+    translate/crawl job is running, so it never interferes with active work."""
+    try:
+        stats = await bot.idle_cleanup()
+        if stats["files_removed"] or stats["chrome_dirs_removed"]:
+            _looper_log.info(
+                "[idle_cleanup] freed %d scratch file(s) (%.1f KB), %d stale chrome profile dir(s), "
+                "gc collected %d objects",
+                stats["files_removed"], stats["bytes_freed"] / 1024,
+                stats["chrome_dirs_removed"], stats["gc_collected"],
+            )
+    except Exception:
+        _looper_log.exception("[idle_cleanup] failed")
+
+
+@idle_cleanup_loop.before_loop
+async def before_idle_cleanup_loop():
+    await bot.wait_until_ready()
+
+
+@idle_cleanup_loop.error
+async def idle_cleanup_loop_error(error: BaseException):
+    _looper_log.error("[idle_cleanup] loop crashed, restarting it", exc_info=error)
+    if not idle_cleanup_loop.is_running():
+        idle_cleanup_loop.restart()
+
+
 @tasks.loop(time=RESTART_TIMES)
 async def scheduled_restart():
     """Runs once per timestamp in RESTART_TIMES, so at most len(RESTART_TIMES)
@@ -94,6 +124,8 @@ async def on_ready():
         housekeeping.start()
     if not scheduled_restart.is_running():
         scheduled_restart.start()
+    if not idle_cleanup_loop.is_running():
+        idle_cleanup_loop.start()
 
 
 # @bot.event
