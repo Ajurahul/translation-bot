@@ -22,6 +22,17 @@ mega.py @git+https://github.com/Ajurahul/mega.py@c3836facd07dba9b396982afd988ed2
 readabilipy==0.2.0
 cloudscraper>=1.2.71
 requests~=2.31.0
+# `translators` (below) pulls in niquests -> urllib3-future, which silently
+# replaces the real `urllib3` package under the same import name - so even
+# plain `requests.post()` calls (e.g. in mega.py) route through it. Its own
+# dependency bound (h11>=0.11.0,<1.0.0) is loose enough to allow a pre-2021
+# h11 that predates h11's move to dataclass-based Data/Response events, and
+# an old h11 there raises: "_EventBundle.__init__() takes 1 positional
+# argument but 2 were given" the first time anything sends an HTTP body.
+# Pinning h11 forward avoids that regardless of what else in the tree wants
+# an older one. If you see that error again, it means h11 got downgraded -
+# run `pip install --upgrade "h11>=0.14.0,<1.0.0"`.
+h11>=0.14.0,<1.0.0
 async_timeout
 joblib~=1.2.0
 aiohttp>=3.9.0
