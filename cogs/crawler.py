@@ -684,11 +684,14 @@ class Crawler(commands.Cog):
             self.urlcss = selector
         # print('translated' + title_name)
         # print(self.urlcss)
-        name = str(link.split("/")[-1].replace(".html", ""))
+        # link.split("/")[-1] alone leaves any query string (e.g. tracking
+        # params, Discord CDN signing params) glued onto the name - see
+        # utils/handler.py's FileHandler.filename_from_url() docstring.
+        name = FileHandler.filename_from_url(link, extensions=(".html",))
         # name=name.replace('all','')
         urls = []
-        frontend_part = link.replace(f"/{name}", "").split("/")[-1]
-        frontend = link.replace(f"/{name}", "").replace(f"/{frontend_part}", "")
+        frontend_part = FileHandler.strip_url_query(link).replace(f"/{name}", "").split("/")[-1]
+        frontend = FileHandler.strip_url_query(link).replace(f"/{name}", "").replace(f"/{frontend_part}", "")
         if "69shu" in link:
             urls = [
                 f"{j}"
@@ -1452,7 +1455,7 @@ class Crawler(commands.Cog):
         # print(title_name)
         library_update: bool = False
         if title_name.strip().lower() == "001 - Read Novel Chapter 001 Online".lower():
-            title_name = firstchplink.split("/")[-1].replace(".html", "")
+            title_name = FileHandler.filename_from_url(firstchplink, extensions=(".html",))
         if title_name is None:
             title_name = (await Translator.atranslate_with_retry(
                 text=title, source="auto", target="english"

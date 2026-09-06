@@ -4,7 +4,7 @@ import os
 import random
 import re
 import typing
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, unquote
 from collections import OrderedDict
 from difflib import SequenceMatcher
 
@@ -631,8 +631,38 @@ class FileHandler:
         return string
 
     @staticmethod
+    def strip_url_query(url: str) -> str:
+        """Removes the query string and fragment from a URL. Discord
+        attachment CDN links carry signing params like
+        '?ex=6717353b&is=6715e3bb&hm=...' that used to leak straight onto
+        the end of titles/filenames whenever code took the URL's last path
+        segment as a name without dropping these first."""
+        if not url:
+            return url
+        return urlsplit(url)._replace(query="", fragment="").geturl()
+
+    @staticmethod
+    def filename_from_url(
+        url: str,
+        extensions: tuple = (".txt", ".docx", ".epub", ".pdf", ".html", ".htm"),
+    ) -> str:
+        """Extracts a clean base name from a URL for use as a title/filename:
+        strips the query string/fragment first (see strip_url_query above -
+        this is the actual fix for the garbage-suffix bug), URL-decodes
+        percent-escapes (spaces, unicode titles, etc. - not just '%20'),
+        then removes one trailing known extension if present."""
+        clean = FileHandler.strip_url_query(url).rstrip("/")
+        name = unquote(clean.split("/")[-1])
+        lowered = name.lower()
+        for ext in extensions:
+            if lowered.endswith(ext):
+                name = name[: -len(ext)]
+                break
+        return name
+
+    @staticmethod
     async def tokenize(link: str) -> tuple[str, ...]:
-        url = link.replace(".html", "").replace(".htm/", "")
+        url = FileHandler.strip_url_query(link).replace(".html", "").replace(".htm/", "")
         suffix = url.split("/")[-1]
         midfix = url.replace(f"/{suffix}", "").split("/")[-1]
         prefix = url.replace(f"/{midfix}/{suffix}", "")

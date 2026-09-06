@@ -359,7 +359,14 @@ class Translate(commands.Cog):
                 return await ctx.send(
                     "> **❌Currently this link is not supported.**", view=view
                 )
-            name = link.split("/")[-1].replace(".txt", "").replace(".docx", "").replace(".epub", "").replace(".pdf", "")
+            # link.split("/")[-1] used to include the query string too, e.g.
+            # Discord's CDN signing params ("?ex=...&is=...&hm=...") landed
+            # straight on the end of the title with no separator, since
+            # .replace(".txt", "") only deletes that exact substring and
+            # leaves everything after it (including "?ex=...") in place.
+            # FileHandler.filename_from_url() strips the query string/
+            # fragment before taking the last path segment.
+            name = FileHandler.filename_from_url(link)
             name = name.replace("%20", " ")
         if "plain" in file_type.lower() or "txt" in file_type.lower() or "plain" in filetype2.lower() or "txt" in filetype2.lower() or "txt" in fullname:
             file_type = "txt"

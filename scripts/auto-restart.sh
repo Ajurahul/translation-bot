@@ -10,12 +10,22 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOG_DIR="$REPO_DIR/logs"
 LOG_FILE="$LOG_DIR/bot.txt"
 STARTUP_LOG="$LOG_DIR/bot_startup.log"
+# Not written by this script directly - it's whatever file your crontab
+# redirects this script's own output into (e.g.
+# `* * * * * .../auto-restart.sh >> /path/to/logs/cron-watchdog.log 2>&1`).
+# Trimmed here too so it doesn't grow forever either; update the path if
+# your crontab redirects somewhere else.
+CRON_LOG="$LOG_DIR/cron-watchdog.log"
 HEALTH_FILE="$LOG_DIR/healthcheck.json"
 SESSION_NAME="ENTER"
 BOT_CMD="python3 main.py"
 HEALTH_MAX_AGE_SECONDS=180
 BOT_START_WAIT_SECONDS=10
 RUN_USER="${USER:-$(id -un 2>/dev/null || echo cron)}"
+# Cap for the plain `>>`-appended logs this script manages. bot.txt is NOT
+# included here - it's rotated by Python's own RotatingFileHandler
+# (core/bot.py), and truncating it from bash risks racing with that.
+MAX_LOG_BYTES=$((5 * 1024 * 1024))
 
 PYTHON_BIN="$(command -v python3 2>/dev/null || true)"
 TMUX_BIN="$(command -v tmux 2>/dev/null || true)"
@@ -28,6 +38,27 @@ log() {
   nowtime="$(date '+%Y-%m-%d %H:%M:%S')"
   echo "$RUN_USER : $1 at $nowtime" >> "$LOG_FILE"
 }
+
+trim_log_file() {
+  # Keeps only the last MAX_LOG_BYTES of a plain-text log instead of letting
+  # it grow forever. Uses `tail ... > file` (not `mv`) so the file keeps the
+  # same inode - safe even while another process (e.g. the bot itself,
+  # writing to $STARTUP_LOG for as long as it runs) holds it open in
+  # append mode; append-mode writers always seek to the current end of
+  # file before writing, so they pick up cleanly after the trim.
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  local size
+  size="$(stat -c %s "$file" 2>/dev/null || stat -f %z "$file" 2>/dev/null || echo 0)"
+  if (( size > MAX_LOG_BYTES )); then
+    if tail -c "$MAX_LOG_BYTES" "$file" > "${file}.trim.tmp" 2>/dev/null; then
+      cat "${file}.trim.tmp" > "$file" && rm -f "${file}.trim.tmp"
+    fi
+  fi
+}
+
+trim_log_file "$STARTUP_LOG"
+trim_log_file "$CRON_LOG"
 
 if [[ -z "$PYTHON_BIN" || -z "$TMUX_BIN" || -z "$GIT_BIN" ]]; then
   log "missing dependency python3/tmux/git (PATH=$PATH)"
