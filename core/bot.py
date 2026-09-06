@@ -97,7 +97,7 @@ class Raizel(commands.Bot):
             self.logger = self.setup_logging()
         await self.write_healthcheck(status="starting")
         self._heartbeat_task = asyncio.create_task(self.heartbeat_loop())
-        self.con = aiohttp.ClientSession()
+        self.con = aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=30, limit_per_host=10))
         self.mongo = Mongo()
         self.logger.info("Connected to mongo db")
         channel = await self.fetch_channel(991911644831678484)
