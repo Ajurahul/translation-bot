@@ -26,8 +26,8 @@ _looper_log = logging.getLogger("looper")
 # and prone to drift/duplication if on_ready fired more than once). Trim this
 # list to a single entry for a once-a-day restart.
 RESTART_TIMES = [
-    datetime.time(hour=4, minute=0, tzinfo=datetime.timezone.utc),
-    datetime.time(hour=16, minute=0, tzinfo=datetime.timezone.utc),
+    datetime.time(hour=8, minute=0, tzinfo=datetime.timezone.utc),   # ~1:30 PM IST (workday) / ~4 AM ET / ~1 AM PT
+    datetime.time(hour=20, minute=0, tzinfo=datetime.timezone.utc),  # ~1:30 AM IST (asleep)  / ~4 PM ET / ~1 PM PT
 ]
 
 

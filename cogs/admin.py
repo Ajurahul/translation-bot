@@ -235,6 +235,7 @@ class Admin(commands.Cog):
                 else:
                     print("waiting")
                     self.bot.app_status = "restart"
+                    await asyncio.sleep(60)
                     active_ids = self.bot.active_job_user_ids()
                     active_names = ', '.join(
                         (self.bot.get_user(uid).global_name if self.bot.get_user(uid) else str(uid))
