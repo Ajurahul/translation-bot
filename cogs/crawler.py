@@ -272,7 +272,8 @@ class Crawler(commands.Cog):
                     )
                     if response is not None:
                         response.encoding = response.apparent_encoding
-                        soup = make_soup(response.text, from_encoding=response.encoding)
+
+                        soup = make_soup(response.content, from_encoding=response.encoding)
                         if str(response.status_code).startswith('4'):
                             if _i >= 4:
                                 if hasattr(self.bot, 'logger'):
@@ -1582,15 +1583,64 @@ class Crawler(commands.Cog):
                         # Stop as soon as the safe-stop threshold is hit
                         # instead of spinning through up to 30 more
                         # iterations on a link we already know is looping.
-                        del self.bot.crawler_next[ctx.author.id]
                         if current_link == firstchplink and i < 10:
+
+                            del self.bot.crawler_next[ctx.author.id]
                             return await ctx.reply(
                                 'Error occurred . Some problem in the site. please try with second and third chapter or '
                                 'give valid css selector for next page button')
+
+
+                        retry_delays = [1, 3, 5, 10]
+                        recovered = False
+                        for _retry_i, _delay in enumerate(retry_delays, start=1):
+                            self.bot.logger.info(
+                                f"[crawlnext] Selector stuck on same link, retry {_retry_i}/{len(retry_delays)} "
+                                f"after {_delay}s | user={ctx.author.id} | current_link={current_link}")
+                            await asyncio.sleep(_delay)
+                            try:
+                                retry_output = await self.getcontent(
+                                    current_link, css, path, self.bot, sel_tag, scraper, next_chp_find, driver)
+                            except Exception as _retry_exc:
+                                self.bot.logger.info(f"[crawlnext] Retry {_retry_i} raised | error={_retry_exc}")
+                                continue
+                            if headless and len(retry_output) > 2 and retry_output[2] is not None:
+                                driver = retry_output[2]
+                            retry_next = retry_output[1] if len(retry_output) > 1 else None
+                            retry_text = str(retry_output[0]) if retry_output else ""
+                            if retry_text and retry_text != 'error' and retry_next and \
+                                    retry_next != current_link and retry_next not in crawled_urls:
+                                # Selector recovered - fold this chapter in
+                                # and resume the normal crawl loop.
+                                full_text += retry_text
+                                chp_count += 1
+                                crawled_urls.add(current_link)
+                                current_link = retry_next
+                                repeats = 0
+                                recovered = True
+                                self.bot.logger.info(
+                                    f"[crawlnext] Selector recovered after retry {_retry_i} | user={ctx.author.id}")
+                                break
+
+                        if recovered:
+                            continue
+
+                        # Still stuck after every retry - stop crawling here,
+                        # but keep and deliver whatever chapters were already
+                        # collected instead of discarding the whole run.
+                        self.bot.logger.warning(
+                            f"[crawlnext] Selector stuck after {len(retry_delays)} retries, delivering "
+                            f"{chp_count} chapter(s) crawled so far | user={ctx.author.id} | link={current_link}")
                         if sel_tag:
-                            return await ctx.send(" There is some problem with the provided selector")
+                            await ctx.send(
+                                f"> ⚠️ There is some problem with the provided selector. "
+                                f"Delivering the {chp_count} chapter(s) crawled so far as a file.")
                         else:
-                            return await ctx.send(" There is some problem with the detected selector")
+                            await ctx.send(
+                                f"> ⚠️ There is some problem with the detected selector. "
+                                f"Delivering the {chp_count} chapter(s) crawled so far as a file.")
+                        full_text = full_text + f"\n\n for more novels ({random.randint(1000, 200000)}) join: https://discord.gg/SZxTKASsHq"
+                        break
                     try:
 
                         output = await self.getcontent(current_link, css, path, self.bot, sel_tag, scraper,
