@@ -44,40 +44,65 @@ PROBE_SOURCE = "en"
 PROBE_TARGET = "es"
 PROBE_TIMEOUT_SECONDS = 20.0
 
+# How long a *real-job* quota/rate-limit failure keeps an engine out of the
+# Auto race. A 429 from a free endpoint is almost always "slow down for a
+# few minutes", not "dead until the bot restarts" -- the old behaviour (no
+# expiry at all) meant a single burst of 429s permanently removed an engine
+# until someone ran `.enginecheck` or restarted the bot, which is how the
+# pool of working engines quietly shrank over a long uptime.
+QUOTA_COOLDOWN_SECONDS = 600.0
+
 _lock = threading.Lock()
 _session_disabled: t.Dict[str, str] = {}
+_disabled_until: t.Dict[str, float] = {}  # name -> monotonic deadline (absent = no expiry)
 _last_checked: t.Dict[str, float] = {}
+
+
+def _expire_locked(name: str) -> None:
+    deadline = _disabled_until.get(name)
+    if deadline is not None and time.monotonic() >= deadline:
+        _session_disabled.pop(name, None)
+        _disabled_until.pop(name, None)
 
 
 def is_session_disabled(name: str) -> bool:
     with _lock:
+        _expire_locked(name)
         return name in _session_disabled
 
 
 def disabled_reason(name: str) -> t.Optional[str]:
     with _lock:
+        _expire_locked(name)
         return _session_disabled.get(name)
 
 
-def mark_session_disabled(name: str, reason: str) -> None:
-    """Disable `name` for the rest of this process (until a later
-    successful health check re-enables it). Safe to call from real job
-    failure handling as well as explicit health checks -- see
-    TranslationManager's quota-failure handling."""
+def mark_session_disabled(name: str, reason: str, ttl: t.Optional[float] = None) -> None:
+    """Disable `name` until a later successful health check re-enables it,
+    or -- when `ttl` (seconds) is given -- until that cooldown elapses on
+    its own. Safe to call from real job failure handling as well as
+    explicit health checks -- see TranslationManager's quota-failure
+    handling, which passes QUOTA_COOLDOWN_SECONDS."""
     with _lock:
         _session_disabled[name] = str(reason)[:300]
+        if ttl is not None and ttl > 0:
+            _disabled_until[name] = time.monotonic() + float(ttl)
+        else:
+            _disabled_until.pop(name, None)
         _last_checked.setdefault(name, time.time())
 
 
 def mark_session_enabled(name: str) -> None:
     with _lock:
         _session_disabled.pop(name, None)
+        _disabled_until.pop(name, None)
 
 
 def clear_all() -> None:
     """Test hook."""
     with _lock:
         _session_disabled.clear()
+        _disabled_until.clear()
         _last_checked.clear()
 
 
@@ -207,6 +232,7 @@ __all__ = [
     "disabled_reason",
     "mark_session_disabled",
     "mark_session_enabled",
+    "QUOTA_COOLDOWN_SECONDS",
     "clear_all",
     "EngineCheckResult",
     "run_health_check",

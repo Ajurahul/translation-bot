@@ -7,12 +7,31 @@ import typing as t
 from core.bot import Raizel
 from languages import languages
 from translation.detection import detect_language_code
-from translation.errors import TranslationError
+from translation.config import settings as _translation_settings
+from translation.errors import (
+    AllEnginesFailedError,
+    InvalidEngineError,
+    TranslationError,
+    is_none_like,
+    is_provider_request_error,
+)
 from translation.errors import filter_error_text as _filter_error_text_impl
 from translation.errors import is_error_response as _is_error_response_impl
+from translation import health as _translation_health
+from translation.providers.text_chunking import split_text
 from translation.jobs import job_limiter
 from translation.manager import TranslationManager
 from translation.registry import registry as translation_registry
+
+
+# Each translation worker thread keeps ONE event loop for its whole life
+# (created by Translator.translates()'s executor initializer) instead of
+# `asyncio.run()` building and tearing down a fresh loop for every chunk.
+# A fresh loop per chunk meant a fresh httpx client / connection pool / TLS
+# handshake per chunk, and made every per-loop cache in the providers
+# useless. Threads that have no such loop (anything else calling the
+# blocking helpers) fall back to asyncio.run() exactly as before.
+_worker_local = threading.local()
 
 
 class Translator:
@@ -136,6 +155,9 @@ class Translator:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
+            loop = getattr(_worker_local, "loop", None)
+            if loop is not None and not loop.is_closed() and not loop.is_running():
+                return loop.run_until_complete(async_fn(*args, **kwargs))
             return asyncio.run(async_fn(*args, **kwargs))
 
         # If called from an active event loop, run the async function in a helper thread.
@@ -215,6 +237,90 @@ class Translator:
     def _translate_batch_with_retry(self, chapter: t.List[str]) -> t.List[str]:
         return Translator._run_async_blocking(self._atranslate_batch_with_retry, chapter)
 
+    # -- crawled-title translation ----------------------------------------
+    @staticmethod
+    def _usable_title(original: str, result: t.Any) -> t.Optional[str]:
+        """Return `result` as a clean string, or None if it isn't a real
+        translation of `original`: None / "None" / empty, a provider error
+        message, or (for non-ASCII input) the untouched original text that
+        some engines hand back when they silently fail."""
+        if result is None:
+            return None
+        text = str(result).strip()
+        if not text:
+            return None
+        if is_none_like(text) and not is_none_like(original):
+            return None
+        if is_provider_request_error(text) or _is_error_response_impl([text]):
+            return None
+        if text.casefold() == original.casefold() and not original.isascii():
+            return None
+        return text
+
+    @staticmethod
+    async def atranslate_title(
+            text: str,
+            target: str = "english",
+            source: str = "auto",
+            max_fallback_engines: int = 4,
+    ) -> t.Optional[str]:
+        """Translate a (crawled) title, or return None if no engine could.
+
+        Never returns "None", an empty string or an error message -- that
+        is the bug where crawled titles came out as "None". If the Auto
+        translation gives nothing usable, every other available engine is
+        tried one by one (each with a short retry schedule, at most
+        `max_fallback_engines` of them) before giving up. Callers should
+        keep the original title when this returns None.
+        """
+        original = str(text or "").strip()
+        if not original:
+            return None
+        target_code = Translator._normalize_language(target, fallback="en")
+        source_code = Translator._normalize_language(source, fallback="auto")
+
+        manager = TranslationManager(engine="auto")
+        try:
+            usable = Translator._usable_title(
+                original, await manager.translate(original, source_code, target_code)
+            )
+            if usable:
+                return usable
+        except TranslationError:
+            pass
+
+        # Auto's own race already tried (and failed) everything it
+        # considered; now go through the engines it skipped or that merely
+        # returned something unusable, one at a time.
+        tried = set(manager.state.failed_engines)
+        if manager.state.active_engine:
+            tried.add(manager.state.active_engine)  # it answered, but with junk
+        order = list(_translation_settings.auto_engine_order)
+        for name in translation_registry.all_registered():
+            if name not in order:
+                order.append(name)
+        fallback = [
+            name for name in order
+            if name not in tried
+            and translation_registry.is_provider_available(name)
+            and not _translation_health.is_session_disabled(name)
+        ][: max(0, max_fallback_engines)]
+        for name in fallback:
+            try:
+                usable = Translator._usable_title(
+                    original,
+                    await manager.translate_via(name, original, source_code, target_code, delays=[1]),
+                )
+            except TranslationError:
+                continue
+            if usable:
+                return usable
+        return None
+
+    @staticmethod
+    def translate_title(text: str, target: str = "english", source: str = "auto") -> t.Optional[str]:
+        return Translator._run_async_blocking(Translator.atranslate_title, text, target, source)
+
     # -- language detection now tries multiple independent detectors
     # (see translation/detection.py) so a single provider's outage/rate
     # limit can no longer make this return "NA" by itself -- retried
@@ -250,81 +356,153 @@ class Translator:
             retry_delays,
         )
 
-    # -- chunk translation with recovery (unchanged behavior) -----------
+    # -- chunk translation with recovery ---------------------------------
+    COULDNT_TRANSLATE_MARKER = "\n\n--->couldn't translate this part\n"
+
+    def _clean_parts(self, parts: t.List[str]) -> t.List[str]:
+        """Strip error-page fragments from translated parts. Blank parts are
+        dropped; a part is never silently emptied (filter_error_text only
+        touches real error-page phrases, see translation/errors.py)."""
+        cleaned: t.List[str] = []
+        for part in parts:
+            value = self._filter_error_text(str(part))
+            if value.strip():
+                cleaned.append(value)
+        return cleaned
+
+    @staticmethod
+    def _engines_are_down(exc: BaseException) -> bool:
+        """True when a failure says "no engine can serve this right now"
+        rather than "this particular text was a problem". Splitting the
+        text and trying again cannot help in the first case, and used to
+        just multiply the (already long) retry waits."""
+        cause = exc.__cause__ or exc
+        return isinstance(cause, (AllEnginesFailedError, InvalidEngineError))
+
+    def _translate_text_recovering(
+            self, text: str, depth: int = 0, prior_exc: t.Optional[BaseException] = None
+    ) -> str:
+        """Translate one chunk; if it cannot be translated, return the
+        ORIGINAL text behind a visible marker -- text must never just
+        disappear from the novel. See _recover_text for the strategy."""
+        result = self._recover_text(text, depth, prior_exc)
+        return result if result is not None else Translator.COULDNT_TRANSLATE_MARKER + text
+
+    def _recover_text(
+            self, text: str, depth: int = 0, prior_exc: t.Optional[BaseException] = None
+    ) -> t.Optional[str]:
+        """Return the translation of `text`, or None if it could not be
+        translated at all. If the first attempt fails for a reason that
+        splitting could fix (too long, odd characters in part of it), each
+        half is retried once; a mixed result keeps what translated and marks
+        only the half that did not.
+
+        `prior_exc` is the failure of an attempt the caller has *already*
+        made on exactly this text; it is then not re-sent as-is (that would
+        repeat the whole retry schedule for nothing) -- we go straight to
+        deciding whether splitting is worthwhile.
+        """
+        exc = prior_exc
+        if exc is None:
+            try:
+                parts = self._clean_parts(self._translate_batch_with_retry([text]))
+                if parts:
+                    return "".join(parts)
+                exc = RuntimeError("translation came back empty")
+            except Exception as e:
+                exc = e
+        min_chars = _translation_settings.min_recoverable_chunk_chars
+        if depth >= 1 or len(text) <= min_chars or self._engines_are_down(exc):
+            return None
+        halves = split_text(text, max(min_chars, (len(text) + 1) // 2))
+        if len(halves) < 2:
+            return None
+        outs = [self._recover_text(h, depth + 1) for h in halves]
+        if all(o is None for o in outs):
+            return None  # nothing worked: report the chunk as ONE failure
+        # Mixed result: keep what translated, mark only the half that didn't.
+        return "".join(
+            o if o is not None else Translator.COULDNT_TRANSLATE_MARKER + h
+            for o, h in zip(outs, halves)
+        )
+
     def translate(self, chapter: t.List[str], num: int) -> t.Tuple[int, t.List[str]]:
-        translated = []
-
-        def clean_parts(parts: t.List[str]) -> t.List[str]:
-            cleaned: t.List[str] = []
-            for part in parts:
-                value = self._filter_error_text(str(part))
-                if value.strip():
-                    cleaned.append(value)
-            return cleaned
-
         try:
-            translated = self._translate_batch_with_retry(chapter)
-            translated = clean_parts(translated)
+            translated = self._clean_parts(self._translate_batch_with_retry(chapter))
+            if translated or not any(str(c).strip() for c in chapter):
+                return num, translated
+            raise RuntimeError("translation came back empty")
         except Exception as e:
             try:
                 if "text must be a valid text" in str(e):
-                    for c in chapter[:]:  # Use slice to avoid modifying while iterating
-                        if not isinstance(c, str) or c.isdigit():
-                            chapter.remove(c)
-                    translated = self._translate_batch_with_retry(chapter)
-                    translated = clean_parts(translated)
-                else:
-                    time.sleep(5)
-                    chp1 = chapter[:len(chapter) // 2]
-                    chp2 = chapter[len(chapter) // 2:]
+                    # Legacy googletrans complaint about non-string / numeric
+                    # items: drop those and retry once.
+                    chapter = [c for c in chapter if isinstance(c, str) and not c.isdigit()]
+                    return num, self._clean_parts(self._translate_batch_with_retry(chapter))
+                # Item by item (a "chunk" here is normally a single string),
+                # each with split-and-retry recovery, instead of the old
+                # blind 5s sleep followed by re-sending the very same chunk.
+                already_tried = e if len(chapter) == 1 else None
+                return num, [
+                    self._translate_text_recovering(str(item), prior_exc=already_tried)
+                    if str(item).strip() else str(item)
+                    for item in chapter
+                ]
+            except Exception:
+                return num, [Translator.COULDNT_TRANSLATE_MARKER + str(tr) for tr in chapter]
 
-                    # Try first half
-                    try:
-                        translated = self._translate_batch_with_retry(chp1)
-                        translated = clean_parts(translated)
-                    except Exception as e1:
-                        translated = chp1
-                        translated.insert(0, "\n\n--->couldn't translate this part")
+    def _make_worker_loop(self, loops: t.List[asyncio.AbstractEventLoop]) -> None:
+        """ThreadPoolExecutor initializer: give this worker thread its own
+        long-lived event loop (see _worker_local above)."""
+        loop = asyncio.new_event_loop()
+        _worker_local.loop = loop
+        loops.append(loop)  # list.append is atomic; closed by translates()
 
-                    # Try second half
-                    new_tr = []
-                    try:
-                        new_tr = self._translate_batch_with_retry(chp2)
-                        new_tr = clean_parts(new_tr)
-                    except Exception as e2:
-                        new_tr = chp2[:]
-                        new_tr.insert(0, "\n\n--->couldn't translate this part")
-
-                    for tr in new_tr:
-                        translated.append(tr)
-            except:
-                for tr in chapter:
-                    translated.append("\n\n--->couldn't translate this part")
-                    translated.append(tr)
-
-        return num, translated
+    @staticmethod
+    def _close_worker_loops(loops: t.List[asyncio.AbstractEventLoop]) -> None:
+        for loop in loops:
+            try:
+                if loop.is_running() or loop.is_closed():
+                    continue
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.run_until_complete(loop.shutdown_default_executor())
+            except Exception:
+                pass
+            finally:
+                try:
+                    loop.close()
+                except Exception:
+                    pass
 
     def translates(self, chapters: t.List[str], no_tasks: int) -> None:
         workers = self.get_no_of_workers(no_tasks, len(chapters))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [
-                executor.submit(self.translate, [url], num)
-                for num, url in enumerate(chapters)
-            ]
-            for future in concurrent.futures.as_completed(futures):
-                result = future.result()
-                self.order[result[0]] = result[1]
-                try:
-                    if self.bot.translator[self.user] == "break":
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        raise Exception("Translation stopped")
-                except Exception as e:
-                    if self.bot.translator[self.user] == "break":
-                        raise e
-                    else:
-                        pass
-                if len(self.order) % 25 == 0:
-                    self.bot.translator[self.user] = f"{len(self.order)}/{len(chapters)}"
+        loops: t.List[asyncio.AbstractEventLoop] = []
+        try:
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=workers,
+                    initializer=self._make_worker_loop,
+                    initargs=(loops,),
+            ) as executor:
+                futures = [
+                    executor.submit(self.translate, [url], num)
+                    for num, url in enumerate(chapters)
+                ]
+                for future in concurrent.futures.as_completed(futures):
+                    result = future.result()
+                    self.order[result[0]] = result[1]
+                    try:
+                        if self.bot.translator[self.user] == "break":
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            raise Exception("Translation stopped")
+                    except Exception as e:
+                        if self.bot.translator.get(self.user) == "break":
+                            raise e
+                        else:
+                            pass
+                    if len(self.order) % 25 == 0:
+                        self.bot.translator[self.user] = f"{len(self.order)}/{len(chapters)}"
+        finally:
+            Translator._close_worker_loops(loops)
 
     async def start(self, chapters: t.List[str], no_of_tasks: int = 8) -> str:
         # Bot-wide cap on simultaneously-running translation jobs (see
@@ -334,12 +512,17 @@ class Translator:
         # queue for a slot rather than being rejected.
         async with await job_limiter.acquire():
             await self.bot.loop.run_in_executor(None, self.translates, chapters, no_of_tasks)
-        ordered_story = {
-            k: v for k, v in sorted(self.order.items(), key=lambda item: item[0])
-        }
-        full_story = [i[0] for i in list(ordered_story.values()) if i[0] is not None]
+        # Join EVERY part of every chunk, in order. This used to keep only
+        # `parts[0]` of each chunk: a failed chunk's result is [marker,
+        # original text], so the original text was silently dropped, and a
+        # chunk whose result list came back empty raised IndexError and
+        # killed the whole job at the very end.
+        full_story = "".join(
+            "".join(p for p in parts if p is not None)
+            for _, parts in sorted(self.order.items(), key=lambda item: item[0])
+        )
         self._fold_usage_into_job()
-        return "".join(full_story)
+        return full_story
 
     @staticmethod
     def get_no_of_workers(no_tasks, size) -> int:

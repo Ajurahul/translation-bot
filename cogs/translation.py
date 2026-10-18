@@ -385,13 +385,15 @@ class Translate(commands.Cog):
         name_check = await FileHandler.checkname(name, self.bot)
         if rawname is not None:
             if not name_check:
-                try:
-                    name = (await Translator.atranslate_with_retry(
-                        text=rawname, source="auto", target="english"
-                    )).strip()
-                    name_check = await FileHandler.checkname(name, self.bot)
-                except:
-                    pass
+                # atranslate_title falls back through other engines and
+                # never hands back "None"/empty/an error message.
+                translated_name = await Translator.atranslate_title(rawname)
+                if translated_name:
+                    name = translated_name
+                    try:
+                        name_check = await FileHandler.checkname(name, self.bot)
+                    except Exception:
+                        pass
         if (not name_check) and library_id is not None:
             name = await self.bot.mongo.library.get_title_by_id(library_id)
             name_check = await FileHandler.checkname(name, self.bot)

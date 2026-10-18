@@ -17,7 +17,12 @@ import os
 import typing as t
 
 from ..base import ProviderCapabilities, TranslationBackend
-from ..errors import PermanentTranslationError, TransientTranslationError
+from ..errors import (
+    PermanentTranslationError,
+    TransientTranslationError,
+    is_mymemory_quota_warning,
+    is_provider_request_error,
+)
 from . import language_map
 
 try:
@@ -134,19 +139,28 @@ class _TranslatorsPackageBackend(TranslationBackend):
         to_code = self._code(target_language)
 
         def _work() -> str:
-            return str(
-                _translators.translate_text(
-                    str(text),
-                    translator=self.provider_key,
-                    from_language=from_code,
-                    to_language=to_code,
-                )
+            result = _translators.translate_text(
+                str(text),
+                translator=self.provider_key,
+                from_language=from_code,
+                to_language=to_code,
             )
+            if result is None:
+                # Don't let str(None) turn a failed call into the word "None".
+                raise TransientTranslationError(f"{self.name} returned no translation")
+            result = str(result)
+            if is_mymemory_quota_warning(result):
+                raise TransientTranslationError(f"{self.name} quota/limit warning: {result[:200]}")
+            if is_provider_request_error(result):
+                raise PermanentTranslationError(f"{self.name} rejected the request: {result[:200]}")
+            return result
 
         try:
             return await asyncio.wait_for(asyncio.to_thread(_work), timeout=CALL_TIMEOUT_SECONDS)
         except asyncio.TimeoutError as exc:
             raise TransientTranslationError(f"{self.name} timed out") from exc
+        except (TransientTranslationError, PermanentTranslationError):
+            raise
         except Exception as exc:
             raise TransientTranslationError(str(exc)) from exc
 
@@ -174,6 +188,12 @@ class TranslatorsMyMemoryBackend(_TranslatorsPackageBackend):
     name = "translators-mymemory"
     display_name = "Translators - MyMemory"
     provider_key = "myMemory"
+    capabilities = ProviderCapabilities(
+        requires_api_key=False,
+        free_without_key=True,
+        supports_batch=False,
+        supports_auto_source=False,
+    )
 
 
 class TranslatorsYandexBackend(_TranslatorsPackageBackend):
@@ -198,6 +218,12 @@ class TranslatorsApertiumBackend(_TranslatorsPackageBackend):
     name = "translators-apertium"
     display_name = "Translators - Apertium"
     provider_key = "apertium"
+    capabilities = ProviderCapabilities(
+        requires_api_key=False,
+        free_without_key=True,
+        supports_batch=False,
+        supports_auto_source=False,
+    )
 
 
 class TranslatorsReversoBackend(_TranslatorsPackageBackend):

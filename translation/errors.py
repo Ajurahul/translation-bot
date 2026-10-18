@@ -78,14 +78,30 @@ def filter_error_text(text: str) -> str:
     if not text:
         return text
 
+    # Only strip real error-page phrases. The previous version also matched
+    # the bare substring "error" with no word boundary, so ordinary novel
+    # text like "fled in terror." was cut down to "fled in t" -- and because
+    # the match ran with DOTALL up to a next-line start in [A-Za-z], text in
+    # any other script (Hindi, Korean, Chinese...) was deleted all the way to
+    # the end of the chunk/story. Word boundaries + "never leave the line the
+    # phrase is on" fix all three. (An earlier attempt at this stopped at the
+    # next line starting with a letter, which failed to strip error pages
+    # followed by a blank line, a digit or a quote.)
+    #
+    # Only whole LINES made up of error-page sentences are removed. This runs
+    # unconditionally on every translated chunk and on the final story, so a
+    # novel line like "Please try again later, she said." must survive; a
+    # mixed line that really is a provider error is left in place, where
+    # is_error_response()/validation rejects the response and it is retried.
+    sentence = r"(?:that['\u2019]s an error|there was an error|please try again later|that['\u2019]s all we know|server error)[.!]?"
     error_patterns = [
-        r"Error 500.*?(?=\n[A-Za-z\u00C0-\u00FF]|\Z)",
-        r"(?:error|server error|that's an error|there was an error|please try again later).*?(?=\n[A-Za-z\u00C0-\u00FF]|\Z)",
+        r"^[ \t]*Error 500\b[^\n\r]*[ \t\r]*$",
+        r"^[ \t]*(?:\d{3}\.[ \t]*)?(?:" + sentence + r"[ \t]*)+[ \t\r]*$",
     ]
 
     result = text
     for pattern in error_patterns:
-        result = re.sub(pattern, "", result, flags=re.IGNORECASE | re.DOTALL)
+        result = re.sub(pattern, "", result, flags=re.IGNORECASE | re.MULTILINE)
 
     return result.strip()
 
@@ -145,3 +161,42 @@ def is_mymemory_quota_warning(text: str) -> bool:
             "query length limit exceeded",
         )
     )
+
+
+# -- provider "soft errors" -------------------------------------------
+# Some providers (MyMemory above all) answer a bad *request* with HTTP 200
+# and put the complaint in the translation field, e.g.:
+#   "'AUTO' IS AN INVALID SOURCE LANGUAGE . EXAMPLE: LANGPAIR=EN|IT USING
+#    2 LETTER ISO OR RFC3066 LIKE ZH-CN. ALMOST ALL LANGUAGES SUPPORTED
+#    BUT SOME MAY HAVE NO CONTENT"
+# Before this check existed, that sentence was accepted as a successful
+# translation and written straight into the user's novel.
+_PROVIDER_REQUEST_ERRORS = (
+    "is an invalid source language",
+    "is an invalid target language",
+    "invalid language pair",
+    "please select two distinct languages",
+    "using 2 letter iso or rfc3066",
+    "no query specified",
+)
+
+
+def is_provider_request_error(text: t.Any) -> bool:
+    """True if `text` is a provider complaining about the *request* (bad
+    language code, same source/target...) rather than a translation.
+    Retrying the identical request can never fix it."""
+    low = str(text or "").lower()
+    return any(marker in low for marker in _PROVIDER_REQUEST_ERRORS)
+
+
+_NONE_LIKE = frozenset({"none", "null", "nan", "undefined"})
+
+
+def is_none_like(text: t.Any) -> bool:
+    """True for None or the *string* forms of it ("None", "null"...).
+    Backends call str() on whatever the library returned, so a library
+    that returned None used to become the 4-letter word "None" and sail
+    through validation -- that is where crawled titles turned into "None"."""
+    if text is None:
+        return True
+    return str(text).strip().lower() in _NONE_LIKE

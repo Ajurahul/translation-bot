@@ -924,15 +924,23 @@ class Crawler(commands.Cog):
             if original_Language == 'english':
                 title = str(title_name[:100])
             else:
-                title = ""
-                try:
-                    title = (await Translator.atranslate_with_retry(
-                        text=title_name, source="auto", target="english"
-                    )).strip()
-                except:
-                    pass
-                title_name = title + "__" + title_name
-                title = str(title[:100])
+                # atranslate_title never returns "None"/empty/an error
+                # message: if the first engine gives junk it moves on to the
+                # next one, and only returns None once every engine failed.
+                translated_title = await Translator.atranslate_title(title_name)
+                if translated_title:
+                    for tag in ['/', '\\', '!', '<', '>', "'", '"', ':', ";", '?', '|', '*', '\r', '\n', '\t']:
+                        translated_title = translated_title.replace(tag, '')
+                    translated_title = translated_title.strip()
+                if translated_title:
+                    title = translated_title
+                    title_name = title + "__" + title_name
+                    title = str(title[:100])
+                else:
+                    # No engine could translate it. Keep the ORIGINAL title
+                    # for both names instead of building "__<original>" (or
+                    # "None__<original>") with an empty/garbage English half.
+                    title = str(title_name[:100])
         print("translated title : " + title_name)
         lookup_title = self._normalize_title_lookup(title_name)
         self.bot.logger.info(f"[crawl] Library lookup started | lookup_title={lookup_title!r}")
@@ -1433,17 +1441,13 @@ class Crawler(commands.Cog):
             if original_Language == 'english':
                 title = str(title[:100])
             else:
-                try:
-                    title = (await Translator.atranslate_with_retry(
-                        text=title, source="auto", target="english"
-                    )).strip()
-                except:
-                    pass
-                title_name = title + "__" + title_name
-                try:
-                    title = str(title[:100])
-                except:
-                    pass
+                translated_title = await Translator.atranslate_title(title)
+                if translated_title:
+                    title = translated_title
+                    title_name = title + "__" + title_name
+                # else: every engine failed -> keep the original title as
+                # both names (see the matching note in crawl()).
+                title = str(title[:100])
             for tag in ['/', '\\', '<', '>', "'", '"', ':', ";", '?', '|', '*', ';', '\r', '\n', '\t', '\\\\']:
                 title = title.replace(tag, '')
         lookup_title = self._normalize_title_lookup(title_name)
@@ -1457,16 +1461,16 @@ class Crawler(commands.Cog):
         library_update: bool = False
         if title_name.strip().lower() == "001 - Read Novel Chapter 001 Online".lower():
             title_name = FileHandler.filename_from_url(firstchplink, extensions=(".html",))
-        if title_name is None:
-            title_name = (await Translator.atranslate_with_retry(
-                text=title, source="auto", target="english"
-            )).strip()
-            if title_name is None:
-                title_name = await FileHandler.get_title(soup=soup)
-                title_name = (await Translator.atranslate_with_retry(
-                    text=title_name, source="auto", target="english"
-                )).strip()
-                title = title_name
+        if title_name is None or str(title_name).strip() in ("", "None"):
+            # (str.strip() never returns None, so the old "if ... is None"
+            # checks on the translated value could never trigger -- a
+            # missing title just sailed through as the string "None".)
+            fallback_title = await Translator.atranslate_title(title)
+            if not fallback_title:
+                raw_title = self._clean_title_text(await FileHandler.get_title(soup=soup))
+                fallback_title = await Translator.atranslate_title(raw_title) or raw_title
+            title_name = fallback_title or firstchplink
+            title = str(title_name)[:100]
         library: int = await FileHandler.checkLibrary(novel_data, title_name, title, original_Language, ctx, self.bot)
         if library == 0:
             return None

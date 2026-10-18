@@ -14,6 +14,7 @@ only gives up (returning "NA") once every combination has failed.
 """
 import asyncio
 import logging
+import threading
 import typing as t
 
 logger = logging.getLogger(__name__)
@@ -31,9 +32,9 @@ except ImportError:  # pragma: no cover - exercised only when dependency missing
     _LANGDETECT_AVAILABLE = False
 
 try:
-    from asyncio import Timeout
-except ImportError:  # Python < 3.11
-    from async_timeout import Timeout
+    import httpx
+except ImportError:  # pragma: no cover - httpx ships with googletrans
+    httpx = None
 
 try:
     from googletrans import Translator as _GoogleTransClient
@@ -63,8 +64,12 @@ _SERVICE_URLS = [
 _MIN_SAMPLE_CHARS = 8
 _UNUSABLE_CODES = frozenset({"un", "unknown", ""})
 
-_googletrans_client = None
-_googletrans_client_lock = asyncio.Lock()
+# One googletrans client PER event loop (httpx's pool binds to the loop that
+# first uses it; worker threads each run their own loop, so a single global
+# client breaks with "attached to a different loop" as soon as a second
+# thread needs the network detector). A plain threading.Lock guards the map.
+_googletrans_clients: t.Dict[t.Any, t.Any] = {}
+_googletrans_client_lock = threading.Lock()
 
 
 async def _detect_with_langdetect(sample: str) -> t.Optional[str]:
@@ -85,17 +90,25 @@ async def _detect_with_langdetect(sample: str) -> t.Optional[str]:
 
 
 async def _get_googletrans_client():
-    global _googletrans_client
-    if _googletrans_client is not None:
-        return _googletrans_client
-    async with _googletrans_client_lock:
-        if _googletrans_client is None:
-            _googletrans_client = _GoogleTransClient(
-                timeout=Timeout(10.0),
+    loop = asyncio.get_running_loop()
+    client = _googletrans_clients.get(loop)
+    if client is not None:
+        return client
+    with _googletrans_client_lock:
+        client = _googletrans_clients.get(loop)
+        if client is None:
+            for dead in [lp for lp in _googletrans_clients if lp.is_closed()]:
+                _googletrans_clients.pop(dead, None)
+            client = _GoogleTransClient(
+                # Must be httpx.Timeout: this used to be asyncio.Timeout(10.0),
+                # which httpx cannot use (TypeError on the first request), so
+                # the network fallback detector never once worked.
+                timeout=httpx.Timeout(10.0),
                 raise_exception=True,
                 service_urls=_SERVICE_URLS,
             )
-    return _googletrans_client
+            _googletrans_clients[loop] = client
+    return client
 
 
 async def _detect_with_googletrans(sample: str) -> t.Optional[str]:

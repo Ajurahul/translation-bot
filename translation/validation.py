@@ -8,7 +8,20 @@ from .errors import (
     TransientTranslationError,
     filter_error_text,
     is_error_response,
+    is_none_like,
+    is_provider_request_error,
 )
+
+
+def _looks_like_failed_none(original: t.Any, text: str) -> bool:
+    """A "translation" that is just None/null for a real input is a failed
+    call whose None got str()'d by a backend. Single short words are left
+    alone ("\u65e0" -> "None" is a legitimate translation), so only inputs
+    with some substance are held to this."""
+    if not is_none_like(text):
+        return False
+    original_text = str(original or "").strip()
+    return len(original_text) > 3 and not is_none_like(original_text)
 
 
 def validate_translation(original: str, raw: t.Optional[str]) -> str:
@@ -18,6 +31,14 @@ def validate_translation(original: str, raw: t.Optional[str]) -> str:
     text = str(raw)
     if not text.strip() and str(original or "").strip():
         raise PermanentTranslationError("translation provider returned an empty response")
+    if _looks_like_failed_none(original, text):
+        raise PermanentTranslationError("translation provider returned None")
+    if is_provider_request_error(text) and not is_provider_request_error(original):
+        # e.g. MyMemory's "'AUTO' IS AN INVALID SOURCE LANGUAGE ..." which
+        # arrives as an ordinary-looking HTTP 200 translation.
+        raise PermanentTranslationError(
+            f"translation provider rejected the request: {text.strip()[:160]}"
+        )
 
     if not is_error_response([text]):
         # Nothing suspicious detected -- return as-is. filter_error_text()
@@ -58,6 +79,14 @@ def validate_translation_batch(
         raise PermanentTranslationError(
             f"translation provider returned {len(items)} item(s) for {len(originals)} input(s)"
         )
+
+    for original, result in zip(originals, items):
+        if _looks_like_failed_none(original, result):
+            raise PermanentTranslationError("translation provider returned None")
+        if is_provider_request_error(result) and not is_provider_request_error(original):
+            raise PermanentTranslationError(
+                f"translation provider rejected the request: {result.strip()[:160]}"
+            )
 
     if not is_error_response(items):
         cleaned = items

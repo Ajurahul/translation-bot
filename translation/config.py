@@ -18,7 +18,32 @@ DEFAULT_SETTINGS_PATH = (
     Path(__file__).resolve().parent.parent / "config" / "translation_settings.json"
 )
 
+# Bump whenever the *tuning* defaults below change. A settings file written
+# by an older version has every default frozen into it (set_default_engine
+# saves the whole dict), which would otherwise pin the bot to the old, slower
+# limits forever -- load() ignores the tuning keys of a file whose version is
+# older than this, while keeping what an admin actually chose (default_engine).
+SCHEMA_VERSION = 2
+_TUNING_KEYS = frozenset(
+    {
+        "auto_engine_order",
+        "retry_delays",
+        "request_delay",
+        "max_concurrency",
+        "provider_concurrency",
+        "requests_per_minute",
+        "provider_requests_per_minute",
+        "max_concurrent_jobs",
+    }
+)
+
+# The Google-backed engines are the fast, high-volume ones; the old blanket
+# 50 requests/minute + 3 concurrent per engine capped a whole job at under
+# one 2000-character chunk per second no matter how many workers it had.
+_GOOGLE_FAMILY = ("googletrans", "deep-google", "translators-google")
+
 DEFAULT_CONFIG: t.Dict[str, t.Any] = {
+    "schema_version": SCHEMA_VERSION,
     "default_engine": "googletrans",
     "auto_engine_order": [
         "googletrans",
@@ -48,13 +73,23 @@ DEFAULT_CONFIG: t.Dict[str, t.Any] = {
     ],
     "retry_delays": [2, 4, 7],
     "request_delay": 0.2,
-    "max_concurrency": 3,
-    "provider_concurrency": {},
+    "max_concurrency": 4,
+    "provider_concurrency": {
+        **{name: 6 for name in _GOOGLE_FAMILY},
+        # MyMemory's free tier is quota-limited by characters per day;
+        # hammering it in parallel only burns that quota faster.
+        "deep-mymemory": 1,
+        "translators-mymemory": 1,
+    },
     "min_recoverable_chunk_chars": 120,
     # Requests-per-minute cap, independent of max_concurrency -- see
     # translation/ratelimit.py for why both are needed.
-    "requests_per_minute": 50,
-    "provider_requests_per_minute": {},
+    "requests_per_minute": 60,
+    "provider_requests_per_minute": {
+        **{name: 180 for name in _GOOGLE_FAMILY},
+        "deep-mymemory": 20,
+        "translators-mymemory": 20,
+    },
     # Bot-wide cap on how many translation jobs run at the same time --
     # see translation/jobs.py. This is the main lever for keeping a
     # sudden burst of simultaneous /translate requests from overloading
@@ -81,7 +116,16 @@ class TranslationSettings:
                 with open(self._path, "r", encoding="utf-8") as f:
                     loaded = json.load(f)
                 if isinstance(loaded, dict):
+                    try:
+                        file_version = int(loaded.get("schema_version", 1))
+                    except (TypeError, ValueError):
+                        file_version = 1
+                    stale = file_version < SCHEMA_VERSION
                     for key in DEFAULT_CONFIG:
+                        if key == "schema_version":
+                            continue
+                        if stale and key in _TUNING_KEYS:
+                            continue  # keep the new defaults, see SCHEMA_VERSION
                         if key in loaded:
                             self._data[key] = loaded[key]
         except Exception:

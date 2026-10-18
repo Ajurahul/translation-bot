@@ -116,15 +116,27 @@ def map_language_code(
 
     lang_dict = _get_engine_dict(engine_name, dict_factory)
 
-    valid_codes = {str(k).lower() for k in lang_dict.keys()} | {
-        str(v).lower() for v in lang_dict.values()
-    }
-    if low in valid_codes:
-        result = original
+    # lowercase -> the engine's own spelling. Matching is case-insensitive,
+    # but the value handed back MUST use the engine's exact casing: deep-
+    # translator validates codes case-sensitively, so returning the caller's
+    # "zh-cn" for MyMemory's "zh-CN" raised "No support for the provided
+    # language" for every Chinese source.
+    canonical = {str(k).lower(): str(k) for k in lang_dict.keys()}
+    canonical.update({str(v).lower(): str(v) for v in lang_dict.values()})
+    if low in canonical:
+        result = canonical[low]
     else:
         name = _CODE_TO_NAME.get(low)
         name_to_code = _build_name_to_code(lang_dict)
         mapped = name_to_code.get(name) if name else None
+        if not mapped:
+            # No name match (e.g. Hebrew "iw"/"he", Tamil "ta"): fall back to
+            # any engine code for the same base language ("ta" -> "ta-IN").
+            base = low.split("-")[0]
+            for code_lc, code in canonical.items():
+                if _is_code_like(code) and code_lc.split("-")[0] == base:
+                    mapped = code
+                    break
         result = mapped if mapped else original
 
     with _code_lock:

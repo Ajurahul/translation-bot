@@ -83,8 +83,14 @@ class GoogleTransBackend(TranslationBackend):
         return result
 
     def __init__(self, call_timeout: float = CALL_TIMEOUT_SECONDS) -> None:
-        self._client = None
-        self._client_loop = None
+        # One client PER event loop. The old design kept a single shared
+        # client and rebuilt it whenever a *different* loop asked for it --
+        # but the job's worker threads each have their own loop and call in
+        # constantly, so every call from a different thread than the last
+        # threw the connection pool away and paid a fresh TLS handshake.
+        # With one client per loop each worker thread keeps (and reuses) its
+        # own warm connection pool.
+        self._clients: t.Dict[t.Any, t.Any] = {}
         # A plain threading.Lock, not asyncio.Lock: this backend instance
         # is a process-wide singleton (see translation/registry.py) that
         # gets called concurrently from *different OS threads*, each
@@ -107,19 +113,24 @@ class GoogleTransBackend(TranslationBackend):
             raise PermanentTranslationError("googletrans package is not installed")
 
         loop = asyncio.get_running_loop()
-        if self._client is not None and self._client_loop is loop:
-            return self._client
+        client = self._clients.get(loop)
+        if client is not None:
+            return client
 
         with self._lock:
-            if self._client is None or self._client_loop is not loop:
-
-                self._client = _GoogleTransClient(
+            client = self._clients.get(loop)
+            if client is None:
+                # Forget clients bound to loops that have since been closed
+                # (asyncio.run() per call, finished worker threads...).
+                for dead in [lp for lp in self._clients if lp.is_closed()]:
+                    self._clients.pop(dead, None)
+                client = _GoogleTransClient(
                     timeout=httpx.Timeout(15.0),
                     raise_exception=True,
                     service_urls=SERVICE_URLS,
                 )
-                self._client_loop = loop
-        return self._client
+                self._clients[loop] = client
+        return client
 
     async def translate(self, text: str, source_language: str, target_language: str) -> str:
         client = await self._get_client()
@@ -134,7 +145,10 @@ class GoogleTransBackend(TranslationBackend):
             raise TransientTranslationError("googletrans timed out") from exc
         except Exception as exc:
             raise TransientTranslationError(str(exc)) from exc
-        return str(getattr(result, "text", result))
+        out = getattr(result, "text", result)
+        if out is None:
+            raise TransientTranslationError("googletrans returned no translation")
+        return str(out)
 
     async def translate_batch(
         self, texts: t.List[str], source_language: str, target_language: str
@@ -153,12 +167,15 @@ class GoogleTransBackend(TranslationBackend):
             raise TransientTranslationError(str(exc)) from exc
         if not isinstance(result, list):
             result = [result]
-        return [str(getattr(item, "text", item)) for item in result]
+        texts_out = [getattr(item, "text", item) for item in result]
+        if any(item is None for item in texts_out):
+            raise TransientTranslationError("googletrans returned no translation for an item")
+        return [str(item) for item in texts_out]
 
     async def aclose(self) -> None:
-        client, self._client = self._client, None
-        self._client_loop = None
-        if client is not None:
+        with self._lock:
+            clients, self._clients = list(self._clients.values()), {}
+        for client in clients:
             try:
                 inner = getattr(client, "client", None)
                 if inner is not None and hasattr(inner, "aclose"):

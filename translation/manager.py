@@ -38,9 +38,11 @@ import typing as t
 from . import health as _health
 from .config import TranslationSettings
 from .config import settings as global_settings
+from .detection import detect_language_code
 from .errors import (
     AllEnginesFailedError,
     InvalidEngineError,
+    PermanentTranslationError,
     TranslationFailedError,
     is_quota_error,
 )
@@ -66,6 +68,22 @@ MAX_ALL_FAILED_RESETS = 1
 # str/list once validated) so "the race found nothing" can never be
 # confused with a legitimate falsy-ish result.
 _NO_WINNER = object()
+
+# Max distinct text samples whose detected language a manager remembers.
+_DETECT_CACHE_MAX = 512
+# Characters of text used to detect a source language (langdetect needs very
+# little; longer samples only cost time).
+_DETECT_SAMPLE_CHARS = 600
+
+
+class _SameLanguage(Exception):
+    """Internal: the detected source language equals the target, so there
+    is nothing to translate (raised only for engines that cannot take
+    source="auto" and therefore needed a detected source)."""
+
+
+def _base_lang(code: t.Optional[str]) -> str:
+    return str(code or "").strip().lower().replace("_", "-").split("-")[0]
 
 
 class JobState:
@@ -113,6 +131,21 @@ class TranslationManager:
         # final human-readable summary.
         self._usage_counts: t.Dict[str, int] = {}
         self._usage_lock = threading.Lock()
+
+        # One job is translated by several worker threads at once, each on
+        # its own event loop (see utils/translate.py). Without this lock,
+        # every one of them noticed "no active engine yet" at job start and
+        # launched its *own* race across every engine -- N workers x M
+        # engines of simultaneous requests, burning rate-limit tokens and
+        # semaphore slots on engines that were about to be cancelled.
+        # Holding it makes exactly one worker do the discovery while the
+        # others wait a moment and then reuse its result.
+        self._discovery_lock = threading.Lock()
+
+        # Detected source language per text sample, for engines that can't
+        # take source="auto" (see _source_for).
+        self._detect_cache: t.Dict[str, t.Optional[str]] = {}
+        self._detect_lock = threading.Lock()
 
     # -- selector parsing / default resolution ------------------------
     @staticmethod
@@ -233,23 +266,100 @@ class TranslationManager:
         finally:
             sem.release()
 
-    async def _try_engine_with_retry(self, engine_name: str, coro_factory, validator) -> t.Any:
+    async def _try_engine_with_retry(
+        self, engine_name: str, coro_factory, validator, delays: t.Optional[t.List[float]] = None
+    ) -> t.Any:
         async def _attempt() -> t.Any:
             raw = await self._call_backend(engine_name, coro_factory)
             return validator(raw)
 
         return await run_with_retries(
             _attempt,
-            delays=self._settings.retry_delays,
+            delays=self._settings.retry_delays if delays is None else delays,
             on_failure=lambda attempt, exc: logger.info(
                 "Provider failure provider=%s attempt=%s reason=%s", engine_name, attempt, exc
             ),
         )
 
     # -- public API -------------------------------------------------
+    # -- source-language resolution ----------------------------------
+    async def _detect_source(self, samples: t.Sequence[str]) -> t.Optional[str]:
+        sample = " ".join(str(s).strip() for s in samples if s and str(s).strip())[
+            :_DETECT_SAMPLE_CHARS
+        ]
+        if not sample:
+            return None
+        with self._detect_lock:
+            if sample in self._detect_cache:
+                return self._detect_cache[sample]
+        code = await detect_language_code(sample)
+        result = None if (not code or code == "NA") else code
+        with self._detect_lock:
+            if len(self._detect_cache) >= _DETECT_CACHE_MAX:
+                self._detect_cache.clear()
+            self._detect_cache[sample] = result
+        return result
+
+    async def _source_for(
+        self,
+        backend,
+        samples: t.Sequence[str],
+        source_language: str,
+        target_language: str,
+    ) -> str:
+        """What to send as `source` to this particular backend.
+
+        Not every engine accepts source="auto": MyMemory answers it with
+        "'AUTO' IS AN INVALID SOURCE LANGUAGE ..." (as an HTTP 200
+        *translation*), DeepL/Papago/Microsoft reject it outright. Those
+        backends declare `capabilities.supports_auto_source = False`, and
+        for them the source is detected here (offline langdetect first,
+        see translation/detection.py) instead of being passed through.
+        """
+        source = (source_language or "auto").strip()
+        if source.lower() != "auto":
+            return source
+        caps = getattr(backend, "capabilities", None)
+        if caps is None or getattr(caps, "supports_auto_source", True):
+            return source
+
+        detected = await self._detect_source(samples)
+        name = getattr(backend, "name", "engine")
+        if detected is None:
+            raise PermanentTranslationError(
+                f"{name} needs an explicit source language and it could not be detected"
+            )
+        if _base_lang(detected) == _base_lang(target_language):
+            raise _SameLanguage()
+        return detected
+
+    async def _invoke(self, backend, samples, source_language, target_language, call, identity):
+        """Resolve the source for `backend`, then run `call(source)`. If the
+        text is already in the target language, `identity()` is returned
+        for Default/Explicit jobs (nothing to do), while Auto treats it as a
+        failure of this engine so a real auto-detecting engine handles it
+        -- an instant do-nothing "success" must not win Auto's race."""
+        try:
+            source = await self._source_for(backend, samples, source_language, target_language)
+        except _SameLanguage:
+            if self.state.mode != MODE_AUTO:
+                return identity()
+            raise PermanentTranslationError(
+                f"{getattr(backend, 'name', 'engine')} cannot translate text that is already in the target language"
+            )
+        return await call(source)
+
+    # -- public API -------------------------------------------------
     async def translate(self, text: str, source_language: str, target_language: str) -> str:
         return await self._run(
-            coro_factory=lambda backend: backend.translate(text, source_language, target_language),
+            coro_factory=lambda backend: self._invoke(
+                backend,
+                [text],
+                source_language,
+                target_language,
+                lambda src: backend.translate(text, src, target_language),
+                lambda: text,
+            ),
             validator=lambda raw: validate_translation(text, raw),
             usage_count=1,
         )
@@ -258,16 +368,67 @@ class TranslationManager:
         self, texts: t.List[str], source_language: str, target_language: str
     ) -> t.List[str]:
         return await self._run(
-            coro_factory=lambda backend: backend.translate_batch(
-                texts, source_language, target_language
+            coro_factory=lambda backend: self._invoke(
+                backend,
+                texts,
+                source_language,
+                target_language,
+                lambda src: backend.translate_batch(texts, src, target_language),
+                lambda: list(texts),
             ),
             validator=lambda raw: validate_translation_batch(texts, raw),
             usage_count=max(1, len(texts)),
         )
 
+    async def translate_via(
+        self,
+        engine_name: str,
+        text: str,
+        source_language: str,
+        target_language: str,
+        delays: t.Optional[t.List[float]] = None,
+    ) -> str:
+        """Translate with one *specific* engine regardless of this
+        manager's mode, with its own (usually shorter) retry schedule. Used
+        for "this engine failed, try another one" fallbacks (e.g. crawled
+        titles) where the normal full retry schedule would stall the caller.
+        Raises TranslationFailedError on failure."""
+        if not self._registry.is_provider_available(engine_name):
+            raise InvalidEngineError(f"Translation engine '{engine_name}' is not available")
+        try:
+            result = await self._try_engine_with_retry(
+                engine_name,
+                lambda backend: self._invoke(
+                    backend,
+                    [text],
+                    source_language,
+                    target_language,
+                    lambda src: backend.translate(text, src, target_language),
+                    lambda: text,
+                ),
+                lambda raw: validate_translation(text, raw),
+                delays=delays,
+            )
+        except Exception as exc:
+            self._note_if_quota_failure(engine_name, exc)
+            raise TranslationFailedError(
+                f"Translation failed using {self._registry.get_display_name(engine_name)}"
+            ) from exc
+        self.record_usage(engine_name, 1)
+        return result
+
     def mark_success(self, engine: str) -> None:
         self.state.active_engine = engine
         self.state.failed_engines.discard(engine)
+        if self.state.mode == MODE_AUTO:
+            # Remember the proven engine registry-wide so the *next* job (or
+            # the next crawled title/description, which each build a brand
+            # new manager) tries it first instead of re-racing every
+            # engine from scratch.
+            try:
+                self._registry.preferred_engine = engine
+            except Exception:  # pragma: no cover - exotic registry stand-ins
+                pass
 
     def mark_failed(self, engine: str) -> None:
         self.state.failed_engines.add(engine)
@@ -296,8 +457,12 @@ class TranslationManager:
         See translation/health.py's module docstring for why this is a
         session-wide disable rather than a per-job failure."""
         if is_quota_error(exc):
-            _health.mark_session_disabled(engine, str(exc))
-            logger.info("Provider quota/rate-limit hit, session-disabling provider=%s", engine)
+            _health.mark_session_disabled(engine, str(exc), ttl=_health.QUOTA_COOLDOWN_SECONDS)
+            logger.info(
+                "Provider quota/rate-limit hit, disabling provider=%s for %ss",
+                engine,
+                int(_health.QUOTA_COOLDOWN_SECONDS),
+            )
 
     # -- mode dispatch ------------------------------------------------
     async def _run(self, coro_factory, validator, usage_count: int = 1) -> t.Any:
@@ -421,41 +586,98 @@ class TranslationManager:
             logger.info("Provider selected provider=%s mode=auto-race", winner_engine)
         return winner_result
 
+    async def _try_active_engine(self, coro_factory, validator, usage_count: int) -> t.Any:
+        """Use the already-proven-healthy engine -- the whole point of
+        Auto: find a working provider once, then stop probing every
+        engine on every subsequent chunk. Returns `_NO_WINNER` if there
+        is none (or it just failed and was marked as such)."""
+        engine = self.state.active_engine
+        if not engine or engine in self.state.failed_engines:
+            return _NO_WINNER
+        try:
+            result = await self._try_engine_with_retry(engine, coro_factory, validator)
+            self.record_usage(engine, usage_count)
+            return result
+        except Exception as exc:
+            logger.info("Provider switched from=%s reason=%s", engine, exc)
+            self.mark_failed(engine)
+            self._note_if_quota_failure(engine, exc)
+            return _NO_WINNER
+
+    async def _try_preferred_engine(self, coro_factory, validator, usage_count: int) -> t.Any:
+        """Before racing everything, give the engine that most recently
+        won *any* Auto job in this process one fast attempt (no retry
+        delays). In the common case this turns "race 12 engines" into
+        "one request"; if it fails we forget it and fall through to the
+        race."""
+        pref = getattr(self._registry, "preferred_engine", None)
+        if (
+            not pref
+            or pref in self.state.failed_engines
+            or not self._registry.is_provider_available(pref)
+            or _health.is_session_disabled(pref)
+        ):
+            return _NO_WINNER
+        try:
+            result = await self._try_engine_with_retry(pref, coro_factory, validator, delays=[])
+        except Exception as exc:
+            logger.info("Preferred provider %s failed (%s); racing instead", pref, exc)
+            self.mark_failed(pref)
+            self._note_if_quota_failure(pref, exc)
+            if getattr(self._registry, "preferred_engine", None) == pref:
+                self._registry.preferred_engine = None
+            return _NO_WINNER
+        self.mark_success(pref)
+        self.record_usage(pref, usage_count)
+        return result
+
     async def _run_auto(self, coro_factory, validator, usage_count: int = 1) -> t.Any:
-        # Reuse the already-proven-healthy engine first -- this is the
-        # whole point of Auto: find a working provider once, then stop
-        # probing every engine on every subsequent chunk.
-        if self.state.active_engine and self.state.active_engine not in self.state.failed_engines:
-            engine = self.state.active_engine
-            try:
-                result = await self._try_engine_with_retry(engine, coro_factory, validator)
-                self.record_usage(engine, usage_count)
+        result = await self._try_active_engine(coro_factory, validator, usage_count)
+        if result is not _NO_WINNER:
+            return result
+
+        # No proven-healthy engine right now. Only one worker thread may
+        # run discovery at a time (see _discovery_lock); anyone queued
+        # behind it re-checks first, because the worker ahead of them has
+        # usually just found a working engine for everyone.
+        if not self._discovery_lock.acquire(blocking=False):
+            # Someone else is mid-discovery: wait for them (off the event
+            # loop -- a plain blocking acquire here would freeze this
+            # worker's loop and anything else scheduled on it).
+            await self._shielded_blocking_wait(
+                self._discovery_lock.acquire, release_fn=self._discovery_lock.release
+            )
+        try:
+            result = await self._try_active_engine(coro_factory, validator, usage_count)
+            if result is not _NO_WINNER:
                 return result
-            except Exception as exc:
-                logger.info("Provider switched from=%s reason=%s", engine, exc)
-                self.mark_failed(engine)
-                self._note_if_quota_failure(engine, exc)
 
-        # No proven-healthy engine right now -- race every currently
-        # available candidate concurrently and adopt whichever succeeds
-        # first, instead of trying them one at a time in order.
-        for _pass in range(MAX_ALL_FAILED_RESETS + 1):
-            candidates = self._auto_candidates()
-            if candidates:
-                result = await self._discover_auto_engine(candidates, coro_factory, validator)
-                if result is not _NO_WINNER:
-                    if self.state.active_engine:
-                        self.record_usage(self.state.active_engine, usage_count)
-                    return result
+            result = await self._try_preferred_engine(coro_factory, validator, usage_count)
+            if result is not _NO_WINNER:
+                return result
 
-            # Either there were no candidates at all, or every one of
-            # them lost the race. Bounded reset: clear per-job failure
-            # state once and race a fresh pass (an outage might have
-            # been transient), then give up.
-            if self.state.all_failed_resets >= MAX_ALL_FAILED_RESETS:
-                break
-            self.state.all_failed_resets += 1
-            self.state.failed_engines.clear()
+            # Race every currently available candidate concurrently and
+            # adopt whichever succeeds first, instead of trying them one
+            # at a time in order.
+            for _pass in range(MAX_ALL_FAILED_RESETS + 1):
+                candidates = self._auto_candidates()
+                if candidates:
+                    result = await self._discover_auto_engine(candidates, coro_factory, validator)
+                    if result is not _NO_WINNER:
+                        if self.state.active_engine:
+                            self.record_usage(self.state.active_engine, usage_count)
+                        return result
+
+                # Either there were no candidates at all, or every one of
+                # them lost the race. Bounded reset: clear per-job failure
+                # state once and race a fresh pass (an outage might have
+                # been transient), then give up.
+                if self.state.all_failed_resets >= MAX_ALL_FAILED_RESETS:
+                    break
+                self.state.all_failed_resets += 1
+                self.state.failed_engines.clear()
+        finally:
+            self._discovery_lock.release()
 
         raise AllEnginesFailedError("All available translation engines are currently unavailable")
 

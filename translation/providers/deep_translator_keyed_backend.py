@@ -23,6 +23,7 @@ import asyncio
 import os
 import typing as t
 
+from ..base import ProviderCapabilities
 from ..errors import PermanentTranslationError, TransientTranslationError
 from . import language_map
 from .deep_translator_backend import CALL_TIMEOUT_SECONDS, BATCH_TIMEOUT_SECONDS, _DeepTranslatorBackend
@@ -59,6 +60,14 @@ class _KeyedDeepTranslatorBackend(_DeepTranslatorBackend):
     """
 
     required_env: t.ClassVar[t.Tuple[str, ...]] = ()
+    # DeepL, Microsoft and Papago all reject source="auto" (the manager
+    # detects a real source for them); Baidu overrides this back to True.
+    capabilities = ProviderCapabilities(
+        requires_api_key=True,
+        free_without_key=False,
+        supports_batch=True,
+        supports_auto_source=False,
+    )
 
     def is_available(self) -> bool:
         return _AVAILABLE and all(os.getenv(var) for var in self.required_env)
@@ -191,6 +200,12 @@ class BaiduBackend(_KeyedDeepTranslatorBackend):
     name = "baidu"
     display_name = "Baidu Translate"
     required_env = ("BAIDU_APP_ID", "BAIDU_APP_KEY")
+    capabilities = ProviderCapabilities(
+        requires_api_key=True,
+        free_without_key=False,
+        supports_batch=True,
+        supports_auto_source=True,  # Baidu's API accepts from=auto natively
+    )
 
     def _lang_dict(self) -> t.Dict[str, str]:
         return BAIDU_LANGUAGE_TO_CODE

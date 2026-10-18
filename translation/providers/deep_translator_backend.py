@@ -17,7 +17,12 @@ import threading
 import typing as t
 
 from ..base import ProviderCapabilities, TranslationBackend
-from ..errors import PermanentTranslationError, TransientTranslationError, is_mymemory_quota_warning
+from ..errors import (
+    PermanentTranslationError,
+    TransientTranslationError,
+    is_mymemory_quota_warning,
+    is_provider_request_error,
+)
 from . import language_map
 from .text_chunking import split_text
 
@@ -84,7 +89,11 @@ class _DeepTranslatorBackend(TranslationBackend):
         client = self._get_client(source_language, target_language)
 
         def _work() -> str:
-            return str(client.translate(str(text)))
+            out = client.translate(str(text))
+            if out is None:
+                # str(None) would silently become the word "None".
+                raise TransientTranslationError(f"{self.name} returned no translation")
+            return str(out)
 
         try:
             return await asyncio.wait_for(asyncio.to_thread(_work), timeout=CALL_TIMEOUT_SECONDS)
@@ -100,8 +109,12 @@ class _DeepTranslatorBackend(TranslationBackend):
 
         def _work() -> t.List[str]:
             if hasattr(client, "translate_batch"):
-                return [str(item) for item in client.translate_batch(list(texts))]
-            return [str(client.translate(str(item))) for item in texts]
+                items = client.translate_batch(list(texts))
+            else:
+                items = [client.translate(str(item)) for item in texts]
+            if any(item is None for item in items):
+                raise TransientTranslationError(f"{self.name} returned no translation for an item")
+            return [str(item) for item in items]
 
         try:
             return await asyncio.wait_for(asyncio.to_thread(_work), timeout=BATCH_TIMEOUT_SECONDS)
@@ -141,6 +154,14 @@ class DeepMyMemoryBackend(_DeepTranslatorBackend):
     name = "deep-mymemory"
     display_name = "Deep Translator - MyMemory"
     _client_cls = MyMemoryTranslator
+    # MyMemory's API rejects langpair=auto|xx. TranslationManager sees this
+    # flag and passes a detected source language instead.
+    capabilities = ProviderCapabilities(
+        requires_api_key=False,
+        free_without_key=True,
+        supports_batch=True,
+        supports_auto_source=False,
+    )
 
     def _map_code(self, code: str) -> str:
         return language_map.map_language_code(
@@ -157,6 +178,12 @@ class DeepMyMemoryBackend(_DeepTranslatorBackend):
         if is_mymemory_quota_warning(result):
             raise TransientTranslationError(
                 f"MyMemory quota/limit warning: {str(result)[:200]}"
+            )
+        if is_provider_request_error(result):
+            # e.g. "'AUTO' IS AN INVALID SOURCE LANGUAGE ..." -- a bad
+            # request, not a flaky service; retrying can't help.
+            raise PermanentTranslationError(
+                f"MyMemory rejected the request: {str(result)[:200]}"
             )
         return result
 
@@ -177,7 +204,7 @@ class DeepMyMemoryBackend(_DeepTranslatorBackend):
             return await asyncio.wait_for(asyncio.to_thread(_work), timeout=timeout)
         except asyncio.TimeoutError as exc:
             raise TransientTranslationError(f"{self.name} timed out") from exc
-        except TransientTranslationError:
+        except (TransientTranslationError, PermanentTranslationError):
             raise
         except Exception as exc:
             raise TransientTranslationError(str(exc)) from exc

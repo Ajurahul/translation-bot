@@ -20,6 +20,11 @@ class ProviderRegistry:
         self._display_names: t.Dict[str, str] = {}
         self._instances: t.Dict[str, TranslationBackend] = {}
         self._lock = threading.Lock()
+        # Engine that most recently won an Auto-mode job anywhere in this
+        # process (set by TranslationManager.mark_success). Lives on the
+        # registry, not in module state, so separate registries (tests) stay
+        # isolated from each other.
+        self.preferred_engine: t.Optional[str] = None
 
     def register(
         self,
