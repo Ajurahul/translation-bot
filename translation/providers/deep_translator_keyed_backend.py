@@ -24,7 +24,7 @@ import os
 import typing as t
 
 from ..base import ProviderCapabilities
-from ..errors import PermanentTranslationError, TransientTranslationError
+from ..errors import describe_exception, PermanentTranslationError, TransientTranslationError
 from . import language_map
 from .deep_translator_backend import CALL_TIMEOUT_SECONDS, BATCH_TIMEOUT_SECONDS, _DeepTranslatorBackend
 
@@ -108,7 +108,7 @@ class _KeyedDeepTranslatorBackend(_DeepTranslatorBackend):
         except PermanentTranslationError:
             raise
         except Exception as exc:
-            raise TransientTranslationError(str(exc)) from exc
+            raise TransientTranslationError(describe_exception(exc)) from exc
 
     async def translate_batch(
         self, texts: t.List[str], source_language: str, target_language: str
@@ -126,7 +126,7 @@ class _KeyedDeepTranslatorBackend(_DeepTranslatorBackend):
         except PermanentTranslationError:
             raise
         except Exception as exc:
-            raise TransientTranslationError(str(exc)) from exc
+            raise TransientTranslationError(describe_exception(exc)) from exc
 
 
 class DeeplBackend(_KeyedDeepTranslatorBackend):

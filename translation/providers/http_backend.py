@@ -24,7 +24,16 @@ except ImportError:  # pragma: no cover - httpx ships as a googletrans dependenc
     httpx = None
     _HTTPX_AVAILABLE = False
 
-from ..errors import PermanentTranslationError, TransientTranslationError
+from ..errors import describe_exception, PermanentTranslationError, TransientTranslationError
+
+
+def split_urls(value: t.Optional[str], default: str) -> t.List[str]:
+    """`"https://a.example, https://b.example/"` -> ["https://a.example",
+    "https://b.example"]; falls back to [default] when unset/blank. Lets an
+    operator list several community instances so one dead mirror no longer
+    takes the whole engine down."""
+    urls = [u.strip().rstrip("/") for u in str(value or "").split(",") if u.strip()]
+    return urls or [default.rstrip("/")]
 
 
 class HttpJsonBackend:
@@ -57,7 +66,7 @@ class HttpJsonBackend:
         except asyncio.TimeoutError as exc:
             raise TransientTranslationError(f"{getattr(self, 'name', 'http')} timed out") from exc
         except Exception as exc:
-            raise TransientTranslationError(str(exc)) from exc
+            raise TransientTranslationError(describe_exception(exc)) from exc
 
         # Some callers (e.g. an AI backend rejecting a bad API key with
         # 401) want specific status codes treated as non-retryable

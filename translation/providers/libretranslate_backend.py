@@ -27,7 +27,7 @@ import typing as t
 
 from ..base import ProviderCapabilities, TranslationBackend
 from ..errors import PermanentTranslationError, TransientTranslationError
-from .http_backend import HttpJsonBackend
+from .http_backend import HttpJsonBackend, split_urls
 
 DEFAULT_BASE_URL = "https://translate.terraprint.co"
 
@@ -43,9 +43,24 @@ class LibreTranslateBackend(HttpJsonBackend, TranslationBackend):
         return self.httpx_available()
 
     def _base_url(self) -> str:
-        return os.getenv("LIBRETRANSLATE_URL", DEFAULT_BASE_URL).rstrip("/")
+        return self._base_urls()[0]
+
+    def _base_urls(self) -> t.List[str]:
+        # LIBRETRANSLATE_URL may list several instances, comma-separated.
+        return split_urls(os.getenv("LIBRETRANSLATE_URL"), DEFAULT_BASE_URL)
 
     async def translate(self, text: str, source_language: str, target_language: str) -> str:
+        last_error: t.Optional[Exception] = None
+        for base in self._base_urls():
+            try:
+                return await self._translate_at(base, text, source_language, target_language)
+            except TransientTranslationError as exc:
+                last_error = exc  # dead/blocked instance: try the next one
+        raise last_error or PermanentTranslationError("no LibreTranslate instance configured")
+
+    async def _translate_at(
+        self, base_url: str, text: str, source_language: str, target_language: str
+    ) -> str:
         payload: t.Dict[str, t.Any] = {
             "q": str(text),
             "source": source_language or "auto",
@@ -56,7 +71,7 @@ class LibreTranslateBackend(HttpJsonBackend, TranslationBackend):
         if api_key:
             payload["api_key"] = api_key
 
-        data = await self._request_json("POST", f"{self._base_url()}/translate", json_body=payload)
+        data = await self._request_json("POST", f"{base_url}/translate", json_body=payload)
         if not isinstance(data, dict):
             raise TransientTranslationError("LibreTranslate returned an unexpected response")
         if "error" in data:

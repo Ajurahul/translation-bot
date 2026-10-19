@@ -478,8 +478,8 @@ def test_stale_settings_file_keeps_admin_choice_but_not_frozen_slow_limits(tmp_p
     s = TranslationSettings(path)
     assert s.default_engine == "deep-google"  # the admin's choice survives
     assert s.requests_per_minute != 50  # new default, not the frozen old one
-    assert s.provider_requests_per_minute["googletrans"] >= 120
-    assert s.provider_concurrency["googletrans"] >= 4
+    assert s.provider_requests_per_minute["google"] >= 100
+    assert s.provider_concurrency["google"] >= 4
 
 
 def test_current_schema_settings_file_is_honoured_in_full(tmp_path):
@@ -552,3 +552,159 @@ def test_translates_does_not_crash_when_progress_entry_is_missing():
     tr._atranslate_batch_with_retry = fake
     tr.translates(["a", "b", "c"], 1)
     assert [tr.order[i][0] for i in range(3)] == ["A", "B", "C"]
+
+
+# -- 9. engine check: batch probe, validation, readable errors ------------
+class _ProbeBackend(TranslationBackend):
+    def __init__(self, name, single="hola", batch=None, exc=None, batch_exc=None):
+        self.name = name
+        self.display_name = name
+        self.capabilities = ProviderCapabilities()
+        self._single, self._batch, self._exc, self._batch_exc = single, batch, exc, batch_exc
+        self.batch_calls = 0
+
+    def is_available(self):
+        return True
+
+    async def translate(self, text, source_language, target_language):
+        if self._exc:
+            raise self._exc
+        return self._single
+
+    async def translate_batch(self, texts, source_language, target_language):
+        self.batch_calls += 1
+        if self._batch_exc:
+            raise self._batch_exc
+        return self._batch if self._batch is not None else ["Hello", "Thank you", "Good morning"]
+
+
+def _check(*backends):
+    return {r.engine: r for r in asyncio.run(health.run_health_check(make_registry(*backends)))}
+
+
+def test_healthy_engine_reports_single_and_batch_with_timings_and_samples():
+    r = _check(_ProbeBackend("good"))["good"]
+    assert r.ok and r.single_ok and r.batch_ok
+    assert r.single_sample == "hola"
+    assert r.batch_sample == "Hello | Thank you | Good morning"
+    assert r.single_ms is not None and r.batch_ms is not None
+
+
+def test_engine_returning_the_string_none_is_no_longer_reported_healthy():
+    # translators-mymemory looked "working" in .enginecheck while returning "None".
+    r = _check(_ProbeBackend("none", single="None"))["none"]
+    assert not r.ok and "None" in r.reason
+    assert health.is_session_disabled("none")
+
+
+def test_engine_returning_a_provider_error_message_is_unhealthy():
+    r = _check(_ProbeBackend("mm", single=MYMEMORY_SOFT_ERROR))["mm"]
+    assert not r.ok and "rejected the request" in r.reason
+
+
+def test_batch_failure_is_reported_separately_and_disables_the_engine():
+    r = _check(_ProbeBackend("b", batch_exc=TransientTranslationError("ko unsupported")))["b"]
+    assert r.single_ok is True and r.batch_ok is False and not r.ok
+    assert r.reason == "batch: ko unsupported" and r.batch_reason == "ko unsupported"
+    assert health.is_session_disabled("b")
+
+
+def test_batch_returning_the_wrong_number_of_items_is_caught():
+    r = _check(_ProbeBackend("short", batch=["Hello"]))["short"]
+    assert r.batch_ok is False and "1 item" in r.reason
+
+
+def test_batch_probe_is_skipped_when_the_single_probe_already_failed():
+    b = _ProbeBackend("dead", exc=TransientTranslationError("down"))
+    r = _check(b)["dead"]
+    assert r.single_ok is False and r.batch_ok is None
+    assert b.batch_calls == 0
+
+
+def test_timeout_has_a_readable_reason_not_an_empty_string():
+    r = _check(_ProbeBackend("slow", exc=asyncio.TimeoutError()))["slow"]
+    assert r.reason and "timed out" in r.reason
+
+
+def test_describe_exception_is_never_empty():
+    import httpx
+
+    from translation.errors import describe_exception
+
+    assert describe_exception(asyncio.TimeoutError()) == "TimeoutError"
+    assert describe_exception(httpx.ConnectTimeout("")) == "ConnectTimeout"
+    assert describe_exception(ValueError("bad")) == "ValueError: bad"
+    assert describe_exception(TransientTranslationError("lingva returned HTTP 500")) == "lingva returned HTTP 500"
+
+
+def test_enginecheck_embed_text_shows_timings_samples_and_batch_failures():
+    from cogs.translation import Translate
+
+    ok = health.EngineCheckResult("a", "Good", True, True, False, None, True, 640, "hola", True, 1200, "Hello | Thank you")
+    text = Translate._engine_check_detail(ok)
+    assert "working" in text and "640ms" in text and "1.2s" in text and "hola" in text and "Hello" in text
+    half = health.EngineCheckResult("b", "Half", True, False, False, "batch: HTTP 500", True, 300, "hola", False, None, None, "HTTP 500")
+    text = Translate._engine_check_detail(half)
+    assert "single ✓" in text and "batch ✗" in text and "HTTP 500" in text
+
+
+# -- 10. shared rate-limit pools -------------------------------------------
+def test_google_family_engines_share_one_rate_group():
+    from translation.config import rate_group
+
+    assert rate_group("googletrans") == rate_group("deep-google") == rate_group("translators-google") == "google"
+    assert rate_group("deep-mymemory") == rate_group("translators-mymemory") == "mymemory"
+    assert rate_group("lingva") == "lingva"
+
+
+def test_same_upstream_engines_share_a_semaphore_and_bucket_but_others_do_not():
+    mgr = TranslationManager(engine="googletrans")
+    assert mgr._semaphore_for("googletrans") is mgr._semaphore_for("deep-google")
+    assert mgr._semaphore_for("googletrans") is mgr._semaphore_for("translators-google")
+    assert mgr._semaphore_for("googletrans") is not mgr._semaphore_for("lingva")
+    assert mgr._rate_limit_for("googletrans") is mgr._rate_limit_for("deep-google")
+    assert mgr._rate_limit_for("lingva") is not mgr._rate_limit_for("googletrans")
+
+
+# -- 11. mirror failover -----------------------------------------------------
+def test_split_urls_handles_lists_blanks_and_default():
+    from translation.providers.http_backend import split_urls
+
+    assert split_urls("https://a.example/, https://b.example ,,", "https://d.example") == [
+        "https://a.example",
+        "https://b.example",
+    ]
+    assert split_urls("", "https://d.example/") == ["https://d.example"]
+    assert split_urls(None, "https://d.example") == ["https://d.example"]
+
+
+def test_lingva_fails_over_to_the_next_instance(monkeypatch):
+    from translation.providers.lingva_backend import LingvaBackend
+
+    monkeypatch.setenv("LINGVA_URL", "https://dead.example, https://alive.example")
+    backend = LingvaBackend()
+    seen = []
+
+    async def fake_request(method, url, **kw):
+        seen.append(url)
+        if "dead.example" in url:
+            raise TransientTranslationError("lingva returned HTTP 500")
+        return {"translation": "Hello"}
+
+    monkeypatch.setattr(backend, "_request_json", fake_request)
+    assert asyncio.run(backend.translate("안녕", "ko", "en")) == "Hello"
+    assert "dead.example" in seen[0] and "alive.example" in seen[1]
+
+
+def test_lingva_raises_the_last_error_when_every_instance_is_down(monkeypatch):
+    from translation.providers.lingva_backend import LingvaBackend
+
+    monkeypatch.setenv("LINGVA_URL", "https://a.example,https://b.example")
+    backend = LingvaBackend()
+
+    async def always_500(method, url, **kw):
+        raise TransientTranslationError("lingva returned HTTP 500")
+
+    monkeypatch.setattr(backend, "_request_json", always_500)
+    with pytest.raises(TransientTranslationError, match="HTTP 500"):
+        asyncio.run(backend.translate("안녕", "ko", "en"))

@@ -18,6 +18,7 @@ import typing as t
 
 from ..base import ProviderCapabilities, TranslationBackend
 from ..errors import (
+    describe_exception,
     PermanentTranslationError,
     TransientTranslationError,
     is_mymemory_quota_warning,
@@ -162,7 +163,7 @@ class _TranslatorsPackageBackend(TranslationBackend):
         except (TransientTranslationError, PermanentTranslationError):
             raise
         except Exception as exc:
-            raise TransientTranslationError(str(exc)) from exc
+            raise TransientTranslationError(describe_exception(exc)) from exc
 
 
 class TranslatorsGoogleBackend(_TranslatorsPackageBackend):

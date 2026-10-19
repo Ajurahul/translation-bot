@@ -32,7 +32,7 @@ import inspect
 import httpx
 
 from ..base import ProviderCapabilities, TranslationBackend
-from ..errors import PermanentTranslationError, TransientTranslationError
+from ..errors import describe_exception, PermanentTranslationError, TransientTranslationError
 
 try:
     from googletrans import Translator as _GoogleTransClient
@@ -144,7 +144,7 @@ class GoogleTransBackend(TranslationBackend):
         except asyncio.TimeoutError as exc:
             raise TransientTranslationError("googletrans timed out") from exc
         except Exception as exc:
-            raise TransientTranslationError(str(exc)) from exc
+            raise TransientTranslationError(describe_exception(exc)) from exc
         out = getattr(result, "text", result)
         if out is None:
             raise TransientTranslationError("googletrans returned no translation")
@@ -164,7 +164,7 @@ class GoogleTransBackend(TranslationBackend):
         except asyncio.TimeoutError as exc:
             raise TransientTranslationError("googletrans timed out") from exc
         except Exception as exc:
-            raise TransientTranslationError(str(exc)) from exc
+            raise TransientTranslationError(describe_exception(exc)) from exc
         if not isinstance(result, list):
             result = [result]
         texts_out = [getattr(item, "text", item) for item in result]

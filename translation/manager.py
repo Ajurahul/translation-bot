@@ -36,7 +36,7 @@ import threading
 import typing as t
 
 from . import health as _health
-from .config import TranslationSettings
+from .config import TranslationSettings, rate_group
 from .config import settings as global_settings
 from .detection import detect_language_code
 from .errors import (
@@ -197,18 +197,22 @@ class TranslationManager:
 
     # -- concurrency ----------------------------------------------------
     def _semaphore_for(self, engine_name: str) -> threading.BoundedSemaphore:
-        limit = self._settings.provider_concurrency.get(engine_name, self._settings.max_concurrency)
+        group = rate_group(engine_name)
+        per_provider = self._settings.provider_concurrency
+        limit = per_provider.get(engine_name, per_provider.get(group, self._settings.max_concurrency))
         limit = max(1, int(limit))
         with TranslationManager._provider_semaphores_lock:
-            sem = TranslationManager._provider_semaphores.get(engine_name)
+            sem = TranslationManager._provider_semaphores.get(group)
             if sem is None:
                 sem = threading.BoundedSemaphore(limit)
-                TranslationManager._provider_semaphores[engine_name] = sem
+                TranslationManager._provider_semaphores[group] = sem
         return sem
 
     def _rate_limit_for(self, engine_name: str):
-        rate = self._settings.provider_requests_per_minute.get(
-            engine_name, self._settings.requests_per_minute
+        group = rate_group(engine_name)
+        per_provider = self._settings.provider_requests_per_minute
+        rate = per_provider.get(
+            engine_name, per_provider.get(group, self._settings.requests_per_minute)
         )
         # Cap the initial burst well below the full per-minute budget --
         # a bucket that lets an entire minute's quota fire instantly at
@@ -220,7 +224,7 @@ class TranslationManager:
         # allowance for the first few chunks without permitting a
         # thundering herd.
         burst = max(1, int(rate // 10))
-        return rate_limiters.get(engine_name, rate, burst=burst)
+        return rate_limiters.get(group, rate, burst=burst)
 
     @staticmethod
     async def _shielded_blocking_wait(blocking_fn, release_fn=None) -> t.Any:

@@ -23,7 +23,7 @@ DEFAULT_SETTINGS_PATH = (
 # saves the whole dict), which would otherwise pin the bot to the old, slower
 # limits forever -- load() ignores the tuning keys of a file whose version is
 # older than this, while keeping what an admin actually chose (default_engine).
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _TUNING_KEYS = frozenset(
     {
         "auto_engine_order",
@@ -37,10 +37,25 @@ _TUNING_KEYS = frozenset(
     }
 )
 
-# The Google-backed engines are the fast, high-volume ones; the old blanket
-# 50 requests/minute + 3 concurrent per engine capped a whole job at under
-# one 2000-character chunk per second no matter how many workers it had.
-_GOOGLE_FAMILY = ("googletrans", "deep-google", "translators-google")
+# Engines that hit the SAME upstream service from the SAME server IP must
+# share one rate-limit budget and one concurrency pool. googletrans,
+# deep-google and translators-google are three libraries talking to Google
+# Translate, and the two MyMemory engines share MyMemory's daily quota;
+# giving each its own bucket silently tripled the real request rate and gets
+# the server's IP throttled ("too many requests" / 403).
+ENGINE_RATE_GROUPS: t.Dict[str, str] = {
+    "googletrans": "google",
+    "deep-google": "google",
+    "translators-google": "google",
+    "deep-mymemory": "mymemory",
+    "translators-mymemory": "mymemory",
+}
+
+
+def rate_group(engine_name: str) -> str:
+    """Name of the shared rate/concurrency pool `engine_name` belongs to
+    (its own name if it shares with nobody)."""
+    return ENGINE_RATE_GROUPS.get(engine_name, engine_name)
 
 DEFAULT_CONFIG: t.Dict[str, t.Any] = {
     "schema_version": SCHEMA_VERSION,
@@ -74,21 +89,22 @@ DEFAULT_CONFIG: t.Dict[str, t.Any] = {
     "retry_delays": [2, 4, 7],
     "request_delay": 0.2,
     "max_concurrency": 4,
+    # Keys are an engine name OR a rate group (see ENGINE_RATE_GROUPS); an
+    # engine-specific key wins over its group's.
     "provider_concurrency": {
-        **{name: 6 for name in _GOOGLE_FAMILY},
+        "google": 6,
         # MyMemory's free tier is quota-limited by characters per day;
         # hammering it in parallel only burns that quota faster.
-        "deep-mymemory": 1,
-        "translators-mymemory": 1,
+        "mymemory": 1,
     },
     "min_recoverable_chunk_chars": 120,
     # Requests-per-minute cap, independent of max_concurrency -- see
     # translation/ratelimit.py for why both are needed.
     "requests_per_minute": 60,
     "provider_requests_per_minute": {
-        **{name: 180 for name in _GOOGLE_FAMILY},
-        "deep-mymemory": 20,
-        "translators-mymemory": 20,
+        # ONE budget shared by all three Google-backed engines.
+        "google": 120,
+        "mymemory": 20,
     },
     # Bot-wide cap on how many translation jobs run at the same time --
     # see translation/jobs.py. This is the main lever for keeping a

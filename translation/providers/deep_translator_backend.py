@@ -18,6 +18,7 @@ import typing as t
 
 from ..base import ProviderCapabilities, TranslationBackend
 from ..errors import (
+    describe_exception,
     PermanentTranslationError,
     TransientTranslationError,
     is_mymemory_quota_warning,
@@ -100,7 +101,7 @@ class _DeepTranslatorBackend(TranslationBackend):
         except asyncio.TimeoutError as exc:
             raise TransientTranslationError(f"{self.name} timed out") from exc
         except Exception as exc:
-            raise TransientTranslationError(str(exc)) from exc
+            raise TransientTranslationError(describe_exception(exc)) from exc
 
     async def translate_batch(
         self, texts: t.List[str], source_language: str, target_language: str
@@ -121,7 +122,7 @@ class _DeepTranslatorBackend(TranslationBackend):
         except asyncio.TimeoutError as exc:
             raise TransientTranslationError(f"{self.name} timed out") from exc
         except Exception as exc:
-            raise TransientTranslationError(str(exc)) from exc
+            raise TransientTranslationError(describe_exception(exc)) from exc
 
 
 class DeepGoogleBackend(_DeepTranslatorBackend):
@@ -207,7 +208,7 @@ class DeepMyMemoryBackend(_DeepTranslatorBackend):
         except (TransientTranslationError, PermanentTranslationError):
             raise
         except Exception as exc:
-            raise TransientTranslationError(str(exc)) from exc
+            raise TransientTranslationError(describe_exception(exc)) from exc
 
     async def translate_batch(
         self, texts: t.List[str], source_language: str, target_language: str

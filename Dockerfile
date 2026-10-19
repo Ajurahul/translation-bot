@@ -27,11 +27,15 @@ FROM python:3.10-slim AS runtime
 # Chrome, for cogs/crawler.py's headless Selenium scraping.
 # Selenium 4.15's built-in Selenium Manager auto-detects this install and
 # downloads a matching chromedriver on its own -- no manual driver pinning.
+# nodejs: the `translators` package runs Bing's (and a few other engines')
+# token JavaScript through `exejs`, which needs a JS runtime. Without it the
+# Bing engine fails with "Could not find an available JavaScript runtime".
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         gnupg \
         ca-certificates \
         fonts-liberation \
+        nodejs \
     && curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
         | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
     && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" \

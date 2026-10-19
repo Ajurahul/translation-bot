@@ -81,13 +81,37 @@ class Translate(commands.Cog):
         return "🔴" if result.changed else "🟥"
 
     @staticmethod
-    def _engine_check_detail(result) -> str:
+    def _short(text, limit: int) -> str:
+        text = " ".join(str(text or "").split())
+        return text if len(text) <= limit else text[: limit - 1] + "…"
+
+    @staticmethod
+    def _ms(value) -> str:
+        if value is None:
+            return "?"
+        return f"{value / 1000:.1f}s" if value >= 1000 else f"{value}ms"
+
+    @staticmethod
+    def _engine_check_detail(result, with_samples: bool = True) -> str:
+        short, ms = Translate._short, Translate._ms
         if not result.configured:
             return "not configured"
         if result.ok:
-            return "recovered, back in rotation" if result.changed else "working"
+            head = "recovered, back in rotation" if result.changed else "working"
+            parts = [head]
+            single = f"single {ms(result.single_ms)}"
+            batch = f"batch {ms(result.batch_ms)}"
+            if with_samples:
+                single += f" → “{short(result.single_sample, 24)}”"
+                batch += f" → “{short(result.batch_sample, 48)}”"
+            parts += [single, batch]
+            return " · ".join(parts)
         prefix = "newly failed" if result.changed else "still disabled"
-        reason = f" — {result.reason}" if result.reason else ""
+        if result.single_ok and result.batch_ok is False:
+            # Single call fine, the list call (what real jobs use) is not.
+            detail = f"single ✓ {ms(result.single_ms)} · batch ✗ {short(result.batch_reason, 110)}"
+            return f"{prefix} — {detail}"
+        reason = f" — {short(result.reason, 130)}" if result.reason else ""
         return f"{prefix}{reason}"
 
     # @commands.has_role(1020638168237740042)
@@ -100,24 +124,39 @@ class Translate(commands.Cog):
         results = await translation_health.run_health_check()
         default_engine = translation_settings.default_engine
 
-        lines = []
-        for result in results:
-            icon = self._engine_check_icon(result)
-            detail = self._engine_check_detail(result)
-            marker = " *(default)*" if result.engine == default_engine else ""
-            lines.append(f"{icon} **{result.label}**{marker} — {detail}")
+        def build(with_samples: bool) -> str:
+            lines = []
+            for result in results:
+                icon = self._engine_check_icon(result)
+                detail = self._engine_check_detail(result, with_samples)
+                marker = " *(default)*" if result.engine == default_engine else ""
+                lines.append(f"{icon} **{result.label}**{marker} — {detail}")
+            return "\n".join(lines)
+
+        description = build(True)
+        if len(description) > 3900:  # Discord embed description limit is 4096
+            description = build(False)
 
         embed = discord.Embed(
             title="🩺 Translation Engine Check",
-            description="\n".join(lines) or "No translation engines are registered.",
+            description=description or "No translation engines are registered.",
             colour=discord.Colour.blurple(),
+        )
+        preferred = getattr(translation_registry, "preferred_engine", None)
+        embed.add_field(
+            name="Auto mode will try first",
+            value=translation_registry.get_display_name(preferred) if preferred else "nothing yet (it races all engines on the next job)",
+            inline=False,
         )
         embed.add_field(
             name="Your most recent job used",
             value=Translator.get_job_usage_summary(ctx.author.id),
             inline=False,
         )
-        embed.set_footer(text="🟢 recovered · ✅ working · 🔴 newly failed · 🟥 still disabled · ⚪ not configured")
+        embed.set_footer(
+            text="🟢 recovered · ✅ working · 🔴 newly failed · 🟥 still disabled · ⚪ not configured\n"
+                 "single = 1 string en→es · batch = 3 Korean lines ko→en (what real jobs use)"
+        )
         await ctx.send(embed=embed)
 
     @commands.hybrid_command(

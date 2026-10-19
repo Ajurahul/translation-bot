@@ -34,8 +34,10 @@ import threading
 import time
 import typing as t
 
+from .errors import describe_exception
 from .registry import ProviderRegistry
 from .registry import registry as global_registry
+from .validation import validate_translation, validate_translation_batch
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,15 @@ PROBE_TEXT = "hello"
 PROBE_SOURCE = "en"
 PROBE_TARGET = "es"
 PROBE_TIMEOUT_SECONDS = 20.0
+
+# The batch probe mirrors what real jobs send (translate_batch, a non-English
+# source, several items) rather than the trivial single-string call above:
+# an engine can answer "hello" fine and still fail on lists, on CJK/Hangul
+# input, or return the wrong number of items.
+PROBE_BATCH_TEXTS = ["안녕하세요", "감사합니다", "좋은 아침이에요"]
+PROBE_BATCH_SOURCE = "ko"
+PROBE_BATCH_TARGET = "en"
+PROBE_BATCH_TIMEOUT_SECONDS = 30.0
 
 # How long a *real-job* quota/rate-limit failure keeps an engine out of the
 # Auto race. A 429 from a free endpoint is almost always "slow down for a
@@ -110,9 +121,29 @@ class EngineCheckResult(t.NamedTuple):
     engine: str
     label: str
     configured: bool  # package installed / required env vars present
-    ok: bool  # probe succeeded (meaningless if not configured)
+    ok: bool  # every probe succeeded (meaningless if not configured)
     changed: bool  # status flipped (recovered, or newly failed) this check
     reason: t.Optional[str]
+    # -- detail of the individual probes (None = not run) -----------------
+    single_ok: t.Optional[bool] = None
+    single_ms: t.Optional[int] = None
+    single_sample: t.Optional[str] = None
+    batch_ok: t.Optional[bool] = None
+    batch_ms: t.Optional[int] = None
+    batch_sample: t.Optional[str] = None
+    batch_reason: t.Optional[str] = None
+
+
+def _why(exc: BaseException, timeout: float) -> str:
+    if isinstance(exc, asyncio.TimeoutError):
+        return f"timed out after {int(timeout)}s"
+    return describe_exception(exc)
+
+
+async def _timed(coro, timeout: float) -> t.Tuple[t.Any, int]:
+    started = time.perf_counter()
+    result = await asyncio.wait_for(coro, timeout=timeout)
+    return result, int((time.perf_counter() - started) * 1000)
 
 
 async def _probe_one(reg: ProviderRegistry, name: str) -> EngineCheckResult:
@@ -130,19 +161,47 @@ async def _probe_one(reg: ProviderRegistry, name: str) -> EngineCheckResult:
         return EngineCheckResult(name, label, False, False, False, "not configured")
 
     was_disabled = is_session_disabled(name)
+
+    # 1) single string. The answer is VALIDATED, not just awaited: an engine
+    #    that "succeeds" with None/""/an error message used to pass.
     try:
-        await asyncio.wait_for(
-            provider.translate(PROBE_TEXT, PROBE_SOURCE, PROBE_TARGET),
-            timeout=PROBE_TIMEOUT_SECONDS,
+        raw, single_ms = await _timed(
+            provider.translate(PROBE_TEXT, PROBE_SOURCE, PROBE_TARGET), PROBE_TIMEOUT_SECONDS
         )
-        mark_session_enabled(name)
-        with _lock:
-            _last_checked[name] = time.time()
-        return EngineCheckResult(name, label, True, True, was_disabled, None)
+        single_sample = validate_translation(PROBE_TEXT, raw)
     except Exception as exc:
-        reason = str(exc)[:300]
+        reason = _why(exc, PROBE_TIMEOUT_SECONDS)
         mark_session_disabled(name, reason)
-        return EngineCheckResult(name, label, True, False, not was_disabled, reason)
+        return EngineCheckResult(
+            name, label, True, False, not was_disabled, reason, single_ok=False
+        )
+
+    # 2) batch -- what real jobs actually call. Skipped when the single call
+    #    already failed (no point waiting out a second timeout).
+    try:
+        raw_batch, batch_ms = await _timed(
+            provider.translate_batch(list(PROBE_BATCH_TEXTS), PROBE_BATCH_SOURCE, PROBE_BATCH_TARGET),
+            PROBE_BATCH_TIMEOUT_SECONDS,
+        )
+        batch_items = validate_translation_batch(list(PROBE_BATCH_TEXTS), raw_batch)
+    except Exception as exc:
+        batch_reason = _why(exc, PROBE_BATCH_TIMEOUT_SECONDS)
+        reason = f"batch: {batch_reason}"
+        mark_session_disabled(name, reason)
+        return EngineCheckResult(
+            name, label, True, False, not was_disabled, reason,
+            single_ok=True, single_ms=single_ms, single_sample=single_sample,
+            batch_ok=False, batch_reason=batch_reason,
+        )
+
+    mark_session_enabled(name)
+    with _lock:
+        _last_checked[name] = time.time()
+    return EngineCheckResult(
+        name, label, True, True, was_disabled, None,
+        single_ok=True, single_ms=single_ms, single_sample=single_sample,
+        batch_ok=True, batch_ms=batch_ms, batch_sample=" | ".join(batch_items),
+    )
 
 
 async def run_health_check(
@@ -228,6 +287,7 @@ async def run_startup_check(registry: t.Optional[ProviderRegistry] = None) -> No
 
 
 __all__ = [
+    "PROBE_BATCH_TEXTS",
     "is_session_disabled",
     "disabled_reason",
     "mark_session_disabled",

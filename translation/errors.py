@@ -200,3 +200,16 @@ def is_none_like(text: t.Any) -> bool:
     if text is None:
         return True
     return str(text).strip().lower() in _NONE_LIKE
+
+
+def describe_exception(exc: BaseException, limit: int = 300) -> str:
+    """Human-readable one-liner for an exception. Plain `str(exc)` is EMPTY for
+    many network errors (httpx timeouts, bare TimeoutError...), which made
+    `.enginecheck` report engines as "still disabled" with no reason at all."""
+    text = str(exc).strip()
+    name = type(exc).__name__
+    if not text:
+        text = name
+    elif name not in text and not isinstance(exc, TranslationError):
+        text = f"{name}: {text}"
+    return text[:limit]
