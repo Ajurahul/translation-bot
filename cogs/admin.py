@@ -467,27 +467,56 @@ class Admin(commands.Cog):
     @commands.has_role(1020638168237740042)
     @commands.hybrid_command(help="Give the progress of all current tasks of the bot(only for bot-admins)... ")
     async def update_mega(self, ctx: commands.Context, password: str = None, username: str = None):
+        # Fall back to stored credentials for any value not supplied.
+        megastore = {}
+        mega_path = os.getenv("MEGA")
+        if mega_path:
+            try:
+                with open(mega_path, 'rb') as f:
+                    megastore = pickle.load(f) or {}
+            except Exception:
+                megastore = {}
+        username = username or megastore.get("user")
+        password = password or megastore.get("password")
+        if not username or not password:
+            return await ctx.reply(content="No MEGA credentials supplied or stored.")
+
         try:
-            with open(os.getenv("MEGA"), 'rb') as f:
-                megastore = pickle.load(f)
-        except:
-            pass
-        if username is None:
-            username = megastore["user"]
-        if password is None:
-            password = megastore["password"]
-        megastore = {"user": username, "password": password}
-        self.bot.logger.info(f"Mega password updated by user {ctx.author.name}")
-        with open(os.getenv("MEGA"), 'wb') as f:
-            pickle.dump(megastore, f)
-        try:
-            self.bot.mega = Mega().login(username, password)
-            await ctx.reply(content=f"connected to mega as {username}")
+            # Mega().login is blocking (network + PBKDF2); keep it off the event loop.
+            self.bot.mega = await asyncio.to_thread(lambda: Mega().login(username, password))
         except Exception as e:
-            await ctx.reply(content=f"Connecting to mega failed due to \n> {e}")
-            print(e.with_traceback())
-            print(e)
-        return
+            self.bot.logger.exception("MEGA login failed")
+            detail = f"{type(e).__name__}: {e}"
+            if isinstance(e, ValueError):  # json.JSONDecodeError: MEGA sent a non-JSON reply
+                detail += "\n" + await asyncio.to_thread(self._probe_mega_api)
+            return await ctx.reply(content=f"Connecting to mega failed due to \n> {detail}"[:1900])
+
+        # Persist credentials only after a successful login.
+        if mega_path:
+            try:
+                with open(mega_path, 'wb') as f:
+                    pickle.dump({"user": username, "password": password}, f)
+            except Exception:
+                self.bot.logger.exception("Could not save MEGA credentials")
+        self.bot.logger.info(f"Mega password updated by user {ctx.author.name}")
+        await ctx.reply(content=f"connected to mega as {username}")
+
+    @staticmethod
+    def _probe_mega_api() -> str:
+        """Show what MEGA's API actually returned (status + body start) to diagnose blocks/proxies."""
+        import requests
+        try:
+            r = requests.post(
+                "https://g.api.mega.co.nz/cs",
+                params={"id": 1},
+                data='[{"a":"us0","user":"probe@example.com"}]',
+                timeout=15,
+            )
+            body = (r.text or "").strip().replace("\n", " ")[:200]
+            return (f"Probe: HTTP {r.status_code}, content-type={r.headers.get('content-type')}, "
+                    f"body={body!r} (empty/HTML => IP blocked, rate-limited, or proxy issue)")
+        except Exception as probe_err:
+            return f"Probe failed: {type(probe_err).__name__}: {probe_err}"
 
     @commands.has_role(1020638168237740042)
     @commands.hybrid_command(help="update category to all novels")
