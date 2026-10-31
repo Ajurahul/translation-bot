@@ -6,6 +6,7 @@ import random
 import re
 import traceback
 import typing
+import unicodedata
 from urllib.parse import urljoin
 
 import aiofiles
@@ -114,6 +115,69 @@ class Translate(commands.Cog):
         reason = f" — {short(result.reason, 130)}" if result.reason else ""
         return f"{prefix}{reason}"
 
+    # ---- auto novel-name handling for non-English filenames -------------
+    # Filenames follow "<english name>__<ORIGINAL>" (the part after "__" is
+    # the raw/original name and is never looked at). Only the part BEFORE
+    # "__" matters: if that part isn't English (e.g. a Chinese filename) it
+    # is translated, validated with the usual name check, and rebuilt as
+    # "<English name>__<original name>" instead of being rejected.
+    _STATUS_TAIL_RE = re.compile(r"(?i)[\s_\-]*(ongoing|completed|complete|latest|updated)\s*$")
+
+    @staticmethod
+    def _is_mostly_non_latin(text: str) -> bool:
+        """True when most letters in `text` are not Latin script
+        (Chinese/Japanese/Korean/Cyrillic/Arabic...). Digits, spaces and
+        punctuation are ignored."""
+        letters = [c for c in str(text or "") if c.isalpha()]
+        if not letters:
+            return False
+        non_latin = sum(1 for c in letters if not unicodedata.name(c, "").startswith("LATIN"))
+        return (non_latin / len(letters)) >= 0.5
+
+    async def _auto_name_from_filename(self, name: str) -> typing.Optional[str]:
+        """If the English part of `name` (everything before "__") is not
+        English, translate it and return "<English>__<original>" -- but only
+        when the translated name passes FileHandler.checkname (the same
+        validity check normal filenames go through). Returns None when the
+        name is already English, can't be translated, or the translation
+        isn't a valid novel name; the caller then falls back to the regular
+        flow untouched."""
+        if not name:
+            return None
+        head = name.split("__")[0].strip()
+        if not head:
+            return None
+        # "我的修仙之路_ongoing" -> split off the status word first so it
+        # doesn't count as "English" text, translate only the title and
+        # re-attach the status word afterwards.
+        status = ""
+        raw_head = head
+        match = self._STATUS_TAIL_RE.search(head)
+        if match:
+            status = match.group(1).lower()
+            raw_head = head[:match.start()].strip(" _-")
+        if not raw_head or not self._is_mostly_non_latin(raw_head):
+            return None
+        try:
+            translated = await Translator.atranslate_title(raw_head.replace("_", " "))
+        except Exception:
+            return None
+        if not translated:
+            return None
+        for tag in ['/', '\\', '<', '>', "'", '"', ':', ';', '?', '|', '*', '!', '\r', '\n', '\t']:
+            translated = translated.replace(tag, '')
+        translated = " ".join(translated.replace("_", " ").split())
+        # Engine handed the text back untranslated / empty -> not usable.
+        if len(translated) < 3 or self._is_mostly_non_latin(translated):
+            return None
+        english = f"{translated}_{status}" if status else translated
+        try:
+            if not await FileHandler.checkname(english, self.bot):
+                return None
+        except Exception:
+            return None
+        return f"{english}__{raw_head}"
+
     # @commands.has_role(1020638168237740042)
     @commands.hybrid_command(
         name="enginecheck",
@@ -201,6 +265,7 @@ class Translate(commands.Cog):
             term: str = None,
             ignore_warnings: bool = False,
             translation_engine: str = "default",
+            auto_name: bool = True,
     ):
         """Check the leaderboard of a user
                Parameters
@@ -225,6 +290,10 @@ class Translate(commands.Cog):
                     add the terms available in bot.. currently we only have chinese terms
                ignore_warnings :
                     give true to ignore the library check
+               translation_engine :
+                    engine used for translating the novel, default / auto / a specific engine
+               auto_name :
+                    if the filename is not in english (eg chinese), translate it and use it as novel name (english__original). default true
                """
         story = ""
         filetype2 = "txt"
@@ -421,7 +490,20 @@ class Translate(commands.Cog):
                                   ephemeral=True)
         if novelname is not None:
             name = novelname
-        name_check = await FileHandler.checkname(name, self.bot)
+        auto_named = False
+        if auto_name and novelname is None:
+            # Non-English filename (e.g. a Chinese title): translate it and
+            # run the usual name check on the English result so the file
+            # isn't rejected as "not a valid novel name". Anything after
+            # "__" in the filename is the original name and is ignored.
+            auto_result = await self._auto_name_from_filename(name)
+            if auto_result:
+                name = auto_result
+                name_check = True
+                auto_named = True
+                await ctx.send(f"> Non-English filename detected. Using novel name : **{name}**", delete_after=15)
+        if not auto_named:
+            name_check = await FileHandler.checkname(name, self.bot)
         if rawname is not None:
             if not name_check:
                 # atranslate_title falls back through other engines and
