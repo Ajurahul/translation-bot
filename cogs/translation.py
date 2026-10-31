@@ -134,14 +134,19 @@ class Translate(commands.Cog):
         non_latin = sum(1 for c in letters if not unicodedata.name(c, "").startswith("LATIN"))
         return (non_latin / len(letters)) >= 0.5
 
-    async def _auto_name_from_filename(self, name: str) -> typing.Optional[str]:
+    async def _auto_name_from_filename(self, name: str, force: bool = False) -> typing.Optional[str]:
         """If the English part of `name` (everything before "__") is not
         English, translate it and return "<English>__<original>" -- but only
         when the translated name passes FileHandler.checkname (the same
         validity check normal filenames go through). Returns None when the
         name is already English, can't be translated, or the translation
         isn't a valid novel name; the caller then falls back to the regular
-        flow untouched."""
+        flow untouched.
+
+        force=True skips the "is it non-Latin?" gate -- used as a retry when
+        the normal name check already failed (e.g. a romanized/pinyin or
+        otherwise non-English name written in Latin letters). The result is
+        only accepted if the translation actually differs from the input."""
         if not name:
             return None
         head = name.split("__")[0].strip()
@@ -156,7 +161,7 @@ class Translate(commands.Cog):
         if match:
             status = match.group(1).lower()
             raw_head = head[:match.start()].strip(" _-")
-        if not raw_head or not self._is_mostly_non_latin(raw_head):
+        if not raw_head or (not force and not self._is_mostly_non_latin(raw_head)):
             return None
         try:
             translated = await Translator.atranslate_title(raw_head.replace("_", " "))
@@ -170,6 +175,11 @@ class Translate(commands.Cog):
         # Engine handed the text back untranslated / empty -> not usable.
         if len(translated) < 3 or self._is_mostly_non_latin(translated):
             return None
+        if force:
+            def _norm(x: str) -> str:
+                return re.sub(r"[^a-z0-9]", "", x.lower())
+            if _norm(translated) == _norm(raw_head):
+                return None  # nothing was translated, so nothing new to validate
         english = f"{translated}_{status}" if status else translated
         try:
             if not await FileHandler.checkname(english, self.bot):
@@ -504,6 +514,16 @@ class Translate(commands.Cog):
                 await ctx.send(f"> Non-English filename detected. Using novel name : **{name}**", delete_after=15)
         if not auto_named:
             name_check = await FileHandler.checkname(name, self.bot)
+            if not name_check and auto_name and novelname is None:
+                # Normal check failed -> translate the name and try again
+                # before giving up on the file.
+                auto_result = await self._auto_name_from_filename(name, force=True)
+                if auto_result:
+                    name = auto_result
+                    name_check = True
+                    auto_named = True
+                    await ctx.send(f"> Filename wasn't a valid name, translated it. Using novel name : **{name}**",
+                                   delete_after=15)
         if rawname is not None:
             if not name_check:
                 # atranslate_title falls back through other engines and
