@@ -7,7 +7,7 @@ import re
 import traceback
 import typing
 import unicodedata
-from urllib.parse import urljoin
+from urllib.parse import unquote, urljoin
 
 import aiofiles
 import cloudscraper
@@ -121,7 +121,44 @@ class Translate(commands.Cog):
     # "__" matters: if that part isn't English (e.g. a Chinese filename) it
     # is translated, validated with the usual name check, and rebuilt as
     # "<English name>__<original name>" instead of being rejected.
-    _STATUS_TAIL_RE = re.compile(r"(?i)[\s_\-]*(ongoing|completed|complete|latest|updated)\s*$")
+    _STATUS_TAIL_RE = re.compile(
+        r"(?i)[\s_\-]*[(\[（【]?\s*(ongoing|completed|complete|latest|updated)\s*[)\]）】]?\s*$")
+    # Chinese status words, e.g. "木叶宇智波 (全本)" -> complete, "(连载中)" -> ongoing
+    _CN_STATUS_TAIL_RE = re.compile(
+        r"[\s_\-]*[(\[（【]?\s*(全本|完本|已完结|完结|全文|连载中|连载|更新中)\s*[)\]）】]?\s*$")
+    _CN_ONGOING = ("连载中", "连载", "更新中")
+    # Placeholder names we must never treat as a real title
+    _BAD_NAMES = {"", "none", "null", "unknown", "file", "attachment"}
+
+    @classmethod
+    def _is_bad_name(cls, name) -> bool:
+        """Empty/placeholder names and machine-generated ones (Discord swaps
+        non-ASCII filenames for a random hex hash like 94ed73aa10b1321a, or
+        a uuid) can't be a real novel title."""
+        text = str(name or "").strip()
+        if text.lower() in cls._BAD_NAMES or not re.search(r"[^\W_]", text):
+            return True
+        return bool(re.fullmatch(r"[0-9a-fA-F]{12,}|[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", text))
+
+    @staticmethod
+    def _filename_from_headers(resp) -> typing.Optional[str]:
+        """Original filename from a Content-Disposition header, if any
+        (handles RFC 5987 filename*=UTF-8''%E6%9C%A8...)."""
+        try:
+            header = resp.headers.get("content-disposition") or resp.headers.get("Content-Disposition") or ""
+        except Exception:
+            return None
+        match = re.search(r"filename\*\s*=\s*[^']*'[^']*'([^;]+)", header, re.I)
+        if match:
+            return unquote(match.group(1).strip().strip('"'))
+        match = re.search(r'filename\s*=\s*"?([^";]+)"?', header, re.I)
+        return unquote(match.group(1).strip()) if match else None
+
+    @staticmethod
+    def _strip_ext(filename: str) -> str:
+        """Remove a trailing .txt/.docx/.epub/.pdf (tolerates stray spaces,
+        like "name. txt")."""
+        return re.sub(r"(?i)\s*\.\s*(txt|docx|epub|pdf)\s*$", "", str(filename or "")).strip()
 
     @staticmethod
     def _is_mostly_non_latin(text: str) -> bool:
@@ -157,8 +194,12 @@ class Translate(commands.Cog):
         # re-attach the status word afterwards.
         status = ""
         raw_head = head
+        cn_match = self._CN_STATUS_TAIL_RE.search(head)
         match = self._STATUS_TAIL_RE.search(head)
-        if match:
+        if cn_match:
+            status = "ongoing" if cn_match.group(1) in self._CN_ONGOING else "complete"
+            raw_head = head[:cn_match.start()].strip(" _-")
+        elif match:
             status = match.group(1).lower()
             raw_head = head[:match.start()].strip(" _-")
         if not raw_head or (not force and not self._is_mostly_non_latin(raw_head)):
@@ -169,7 +210,7 @@ class Translate(commands.Cog):
             return None
         if not translated:
             return None
-        for tag in ['/', '\\', '<', '>', "'", '"', ':', ';', '?', '|', '*', '!', '\r', '\n', '\t']:
+        for tag in ['/', '\\', '<', '>', "'", '"', ':', ';', '?', '|', '*', '!', '\r', '\n', '\t', '(', ')', '[', ']']:
             translated = translated.replace(tag, '')
         translated = " ".join(translated.replace("_", " ").split())
         # Engine handed the text back untranslated / empty -> not usable.
@@ -500,6 +541,21 @@ class Translate(commands.Cog):
                                   ephemeral=True)
         if novelname is not None:
             name = novelname
+        else:
+            # Discord can swap non-ASCII filenames in the CDN url for a hash
+            # (or None/unknown), so look for the real name elsewhere:
+            # Attachment.filename, then the Content-Disposition header.
+            if self._is_bad_name(name):
+                attachment = file if isinstance(file, discord.Attachment) else (
+                    ctx.message.attachments[0] if ctx.message and ctx.message.attachments else None)
+                candidates = [attachment.filename if attachment is not None else None,
+                              self._filename_from_headers(resp) if "resp" in locals() else None]
+                for candidate in candidates:
+                    candidate = self._strip_ext(candidate) if candidate else ""
+                    if candidate and not self._is_bad_name(candidate):
+                        name = candidate
+                        break
+            name = self._strip_ext(name) if name else name
         auto_named = False
         if auto_name and novelname is None:
             # Non-English filename (e.g. a Chinese title): translate it and
@@ -542,6 +598,12 @@ class Translate(commands.Cog):
             name = name.replace("_crawl", "")
             if len(name) >= 5:
                 name_check = True
+        if not name_check and self._is_bad_name(name):
+            await rep_msg.delete()
+            return await ctx.reply(
+                f"> **❌Discord didn't keep the filename of this upload (it came through as `{name}`).**\n"
+                f"Please give the name with the **novelname** option (eg: english name, or "
+                f"`English Name__原名`), or use **rawname** with the original title so it can be translated.")
         if not name_check:
             await rep_msg.delete()
             return await ctx.reply(
