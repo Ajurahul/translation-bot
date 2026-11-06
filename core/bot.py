@@ -24,6 +24,7 @@ from languages.languages import choices
 from languages.sites import sites
 from languages.terms import get_dictionary
 from utils.connector import Mongo
+from core.health_server import start_health_server, stop_health_server
 
 
 class Raizel(commands.Bot):
@@ -59,6 +60,7 @@ class Raizel(commands.Bot):
         self.crawler_count = 0
         self.cache_max_messages = 100
         self._heartbeat_task: Task | None = None
+        self._health_runner = None
         self.healthcheck_path = os.path.normpath(
             os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'logs', 'healthcheck.json')
         )
@@ -96,6 +98,11 @@ class Raizel(commands.Bot):
         if self.logger is None:
             self.logger = self.setup_logging()
         await self.write_healthcheck(status="starting")
+        # HTTP endpoint for the EC2 application status check (never block boot on it)
+        try:
+            self._health_runner = await start_health_server(self)
+        except Exception:
+            self.logger.exception("[health] could not start health server (port in use?)")
         self._heartbeat_task = asyncio.create_task(self.heartbeat_loop())
         self.con = aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=30, limit_per_host=10))
         self.mongo = Mongo()
@@ -415,6 +422,8 @@ class Raizel(commands.Bot):
             await self.write_healthcheck(status="stopping")
         except Exception:
             pass
+        await stop_health_server(self._health_runner)
+        self._health_runner = None
         if self._heartbeat_task is not None:
             self._heartbeat_task.cancel()
             try:

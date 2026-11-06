@@ -4,6 +4,10 @@ services:
     container_name: translation-bot
     restart: unless-stopped
 
+    # EC2 application status check hits this port (see core/health_server.py)
+    ports:
+      - "${HEALTH_PORT:-8080}:${HEALTH_PORT:-8080}"
+
     # Pulls TOKEN, DATABASE, MONGO_URI, MEGA, etc. from ./.env at start.
     # Copy .env.example to .env and fill in real values first.
     env_file:

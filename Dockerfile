@@ -67,6 +67,8 @@ RUN useradd --create-home --shell /usr/sbin/nologin botuser \
     && chown -R botuser:botuser /app
 USER botuser
 
+EXPOSE 8080
+
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD python3 docker/healthcheck.py
 
